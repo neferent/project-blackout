@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.log
+.DS_Store
+docker/valhalla/data/
+docker/valhalla/custom_files/
+pnpm-lock.yaml.bak
+apps/web/dist/
+apps/api/dist/
+coverage/
+*.tsbuildinfo

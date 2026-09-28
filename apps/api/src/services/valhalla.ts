@@ -1,0 +1,76 @@
+import type { LatLng, LineStringGeometry } from "@blackout/shared";
+
+const VALHALLA_URL = process.env.VALHALLA_URL ?? "http://localhost:8002";
+
+interface ValhallaTripResponse {
+  trip: {
+    legs: { shape: string }[];
+    summary: { length: number }; // kilometers
+  };
+}
+
+/** Decodes Valhalla's polyline6-encoded shape into [lng, lat] pairs. */
+function decodePolyline6(encoded: string): [number, number][] {
+  const coordinates: [number, number][] = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+  const factor = 1e6;
+
+  while (index < encoded.length) {
+    let shift = 0;
+    let result = 0;
+    let byte: number;
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+    lat += result & 1 ? ~(result >> 1) : result >> 1;
+
+    shift = 0;
+    result = 0;
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+    lng += result & 1 ? ~(result >> 1) : result >> 1;
+
+    coordinates.push([lng / factor, lat / factor]);
+  }
+
+  return coordinates;
+}
+
+export interface PedestrianRoute {
+  route: LineStringGeometry;
+  distanceKm: number;
+}
+
+export async function requestPedestrianRoute(origin: LatLng, destination: LatLng): Promise<PedestrianRoute> {
+  const response = await fetch(`${VALHALLA_URL}/route`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      locations: [
+        { lat: origin.lat, lon: origin.lng },
+        { lat: destination.lat, lon: destination.lng },
+      ],
+      costing: "pedestrian",
+      units: "kilometers",
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Valhalla routing failed: ${response.status} ${await response.text()}`);
+  }
+
+  const body = (await response.json()) as ValhallaTripResponse;
+  const shape = body.trip.legs.map((leg) => leg.shape).join("");
+
+  return {
+    route: { type: "LineString", coordinates: decodePolyline6(shape) },
+    distanceKm: body.trip.summary.length,
+  };
+}

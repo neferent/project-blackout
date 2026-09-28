@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgis/postgis:17-3.5
+    # No arm64 build is published for this image; runs fine under emulation on Apple Silicon.
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-blackout}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-blackout}
+      POSTGRES_DB: ${POSTGRES_DB:-blackout}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-blackout}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:latest
+    restart: unless-stopped
+    environment:
+      tile_urls: ${VALHALLA_REGION_URL}
+      build_tar: "True"
+      use_tiles_ignore_pbf: "True"
+      server_threads: 2
+    ports:
+      - "${VALHALLA_PORT:-8002}:8002"
+    volumes:
+      - valhalla_data:/custom_files
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-blackout}:${POSTGRES_PASSWORD:-blackout}@postgres:5432/${POSTGRES_DB:-blackout}
+      VALHALLA_URL: http://valhalla:8002
+      API_PORT: ${API_PORT:-8787}
+    ports:
+      - "${API_PORT:-8787}:8787"
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: http://localhost:${API_PORT:-8787}
+      VITE_DEFAULT_CENTER_LAT: ${VITE_DEFAULT_CENTER_LAT:-49.2827}
+      VITE_DEFAULT_CENTER_LNG: ${VITE_DEFAULT_CENTER_LNG:--123.1207}
+    ports:
+      - "${WEB_PORT:-5173}:5173"
+
+volumes:
+  postgres_data:
+  valhalla_data:
