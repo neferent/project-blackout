@@ -9,7 +9,8 @@
     "start": "tsx src/index.ts",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "import:power-grid": "tsx src/scripts/importPowerGridFromStaging.ts"
   },
   "dependencies": {
     "@blackout/shared": "workspace:*",

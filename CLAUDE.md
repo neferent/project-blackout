@@ -43,8 +43,27 @@ must-not-violate rules.
 - On Apple Silicon, `postgres` in `docker-compose.yml` is pinned to `platform: linux/amd64`
   (emulated) because no arm64 build of `postgis/postgis` exists yet; `valhalla` runs native
   arm64.
+- Building/place classification on click (`apps/web/src/features/travel/TravelPanel.vue`,
+  `describeDestination`) tries Overpass's `is_in()`/`pivot` first
+  (`apps/web/src/geo/overpass.ts`) — true point-in-polygon containment against the way/
+  relation whose footprint actually contains the click. **Don't switch this to Nominatim's
+  reverse endpoint alone**: that does a nearest-*point* search, which reliably picks the
+  wrong sub-feature for big-box stores mapped with separate department nodes (pharmacy,
+  garden center, ...) near the main building — verified against live Walmart OSM data.
+  Nominatim reverse (`apps/web/src/geo/nominatim.ts`, `describePlace`) is kept only as a
+  fallback for points Overpass finds no polygon for. Neither reads vector-tile data —
+  OpenFreeMap's OpenMapTiles `building` layer is geometry-only (for 3D extrusion) and
+  carries no `shop=*`/`amenity=*` tags. Both external calls are self-throttled
+  client-side (Nominatim 1 req/sec per its usage policy; Overpass 1 req/1.5s as a
+  good-citizen limit on the free public instance).
 
 ## Out of scope (don't build unless asked)
 
-Buildings/classification, scavenging, inventory, crafting, shelters/devices, real danger
-logic, real encounters, NPCs, multiplayer, deployment.
+Scavenging, inventory, crafting, shelters/devices, real encounters, NPCs, multiplayer,
+deployment.
+
+The power-grid danger mechanic (per-building `connectedToGrid` state, the `disconnect`
+action, and `DangerProvider` proximity to substations/plants) is now in scope — it's
+partially built, see `apps/api/src/services/dangerProvider.ts` and
+`apps/api/src/actions/disconnect.ts`. Rendering it (Phase 3: map layers, a disconnect
+control in the building-lookup UI) is not done yet.

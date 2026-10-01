@@ -19,11 +19,41 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-off Phase 1 data-import job, NOT started by `docker compose up` (see
+  # the "import" profile) — run explicitly with:
+  #   docker compose --profile import run --rm power-grid-import
+  # Populates the osm_import.* staging schema from a Geofabrik extract;
+  # `pnpm --filter api import:power-grid` then upserts staging into the
+  # drizzle-owned power_lines/power_towers/power_substations/power_plants/
+  # roads tables. Reuses VALHALLA_REGION_URL so there's one region knob, not two.
+  power-grid-import:
+    profiles: ["import"]
+    build:
+      context: ./docker/osm2pgsql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      region_url: ${VALHALLA_REGION_URL}
+      DATABASE_URL: postgres://${POSTGRES_USER:-blackout}:${POSTGRES_PASSWORD:-blackout}@postgres:5432/${POSTGRES_DB:-blackout}
+    volumes:
+      - power_grid_import_cache:/import_cache
+
+  valhalla-prep:
+    build:
+      context: ./docker/valhalla
+    environment:
+      tile_url: ${VALHALLA_REGION_URL}
+    volumes:
+      - valhalla_data:/custom_files
+
   valhalla:
     image: ghcr.io/valhalla/valhalla-scripted:latest
     restart: unless-stopped
+    depends_on:
+      valhalla-prep:
+        condition: service_completed_successfully
     environment:
-      tile_urls: ${VALHALLA_REGION_URL}
       build_tar: "True"
       use_tiles_ignore_pbf: "True"
       server_threads: 2
@@ -60,7 +90,15 @@ services:
       VITE_DEFAULT_CENTER_LNG: ${VITE_DEFAULT_CENTER_LNG:--123.1207}
     ports:
       - "${WEB_PORT:-5173}:5173"
+    volumes:
+      - ./apps/web:/repo/apps/web
+      - ./packages/shared:/repo/packages/shared
+      # Anonymous volumes so the bind mounts above don't hide the
+      # node_modules installed into the image at build time.
+      - /repo/node_modules
+      - /repo/apps/web/node_modules
 
 volumes:
   postgres_data:
   valhalla_data:
+  power_grid_import_cache:

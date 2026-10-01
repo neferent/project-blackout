@@ -4,7 +4,7 @@ import maplibregl from "maplibre-gl";
 import { useMapStore } from "../../stores/mapStore.js";
 import { usePlayerStore } from "../../stores/playerStore.js";
 import { config } from "../../config.js";
-import { searchPlaces, type NominatimResult } from "./nominatim.js";
+import { searchPlaces, type NominatimResult } from "../../geo/nominatim.js";
 
 const emit = defineEmits<{ placed: [] }>();
 

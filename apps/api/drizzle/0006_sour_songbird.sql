@@ -1,0 +1,1 @@
+ALTER TABLE "building_lookups" ADD COLUMN "connected_to_grid" boolean DEFAULT true NOT NULL;

@@ -15,6 +15,41 @@
       "when": 1790629125888,
       "tag": "0001_nasty_expediter",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790632001718,
+      "tag": "0002_tan_amazoness",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790725052783,
+      "tag": "0003_giant_preak",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790792231736,
+      "tag": "0004_brainy_warlock",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790805955273,
+      "tag": "0005_smart_jackpot",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790807998704,
+      "tag": "0006_sour_songbird",
+      "breakpoints": true
     }
   ]
 }

@@ -38,10 +38,23 @@ with a server-authoritative game clock. See `ARCHITECTURE.md` for how it's built
    docker compose up --build
    ```
 
-   First boot will take a while: Valhalla downloads the extract and builds routing tiles
-   (this can take several minutes to an hour depending on region size and machine). Watch
-   `docker compose logs -f valhalla` for progress. The API runs its Postgres migrations
-   automatically on startup.
+   First boot will take a while: `valhalla-prep` downloads the extract and patches it
+   (adding `foot=yes` to cycleways/shared paths that OSM tagging leaves foot-inaccessible,
+   so pedestrian routing isn't wrongly denied a way a bike could use — see
+   `docker/valhalla/patch_foot_access.py`), then `valhalla` builds routing tiles from the
+   result (this can take several minutes to an hour depending on region size and machine).
+   Watch `docker compose logs -f valhalla-prep valhalla` for progress. The API runs its
+   Postgres migrations automatically on startup.
+
+   Changing `VALHALLA_REGION_URL` or editing `patch_foot_access.py` after tiles already
+   exist won't take effect on its own — `valhalla-prep` skips work once a patched extract
+   is present, and `valhalla` is configured to reuse existing tiles. Force a rebuild with:
+
+   ```sh
+   docker compose down
+   docker volume rm project-blackout_valhalla_data
+   docker compose up --build
+   ```
 
 3. Open http://localhost:5180 (`WEB_PORT` in `.env`; moved off Vite's usual 5173 since
    that's commonly already taken by other projects).
@@ -73,3 +86,23 @@ Schema lives in `apps/api/src/db/schema.ts`. After changing it:
 pnpm --filter api db:generate   # writes SQL into apps/api/drizzle/
 pnpm --filter api db:migrate    # applies it (also runs automatically in the api container)
 ```
+
+## Power-grid data import (optional)
+
+Most power-grid data (major lines/towers) is fetched live from Overpass and cached on
+demand — no import needed for that. For a region you want fully pre-loaded (substations,
+plants, and the full road hierarchy used to infer local distribution — see
+`project_power_grid_danger_system` design notes), run a one-off bulk import from a
+Geofabrik `.osm.pbf` extract:
+
+```sh
+docker compose --profile import run --rm power-grid-import   # reuses VALHALLA_REGION_URL
+pnpm --filter api import:power-grid                           # upserts staging into final tables
+```
+
+The first command downloads the extract (cached in the `power_grid_import_cache` volume)
+and runs `osm2pgsql` with a flex-output style (`docker/osm2pgsql/style.lua`) into a
+throwaway `osm_import` staging schema; the second upserts from there into the
+drizzle-owned `power_lines`/`power_towers`/`power_substations`/`power_plants`/`roads`
+tables (keyed by OSM type+id, same dedup pattern as everywhere else) and drops the
+staging schema.

@@ -1,6 +1,13 @@
-import type { LatLng, LineStringGeometry } from "@blackout/shared";
+import { haversineKm, type LatLng, type LineStringGeometry } from "@blackout/shared";
 
 const VALHALLA_URL = process.env.VALHALLA_URL ?? "http://localhost:8002";
+
+/**
+ * Below this gap, treat the network-snapped point as "close enough" and skip
+ * adding a straight connector segment — avoids visible jitter from polyline6's
+ * ~1m encoding precision.
+ */
+const LAST_MILE_THRESHOLD_KM = 0.003;
 
 interface ValhallaTripResponse {
   trip: {
@@ -48,7 +55,11 @@ export interface PedestrianRoute {
   distanceKm: number;
 }
 
-export async function requestPedestrianRoute(origin: LatLng, destination: LatLng): Promise<PedestrianRoute> {
+export async function requestPedestrianRoute(
+  origin: LatLng,
+  destination: LatLng,
+  excludePolygons?: LatLng[][],
+): Promise<PedestrianRoute> {
   const response = await fetch(`${VALHALLA_URL}/route`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -59,6 +70,11 @@ export async function requestPedestrianRoute(origin: LatLng, destination: LatLng
       ],
       costing: "pedestrian",
       units: "kilometers",
+      // Valhalla drops any graph edge that intersects one of these rings from
+      // routing consideration — [lon, lat] order, unlike `locations` above.
+      ...(excludePolygons?.length
+        ? { exclude_polygons: excludePolygons.map((ring) => ring.map((p) => [p.lng, p.lat])) }
+        : {}),
     }),
   });
 
@@ -69,8 +85,33 @@ export async function requestPedestrianRoute(origin: LatLng, destination: LatLng
   const body = (await response.json()) as ValhallaTripResponse;
   const shape = body.trip.legs.map((leg) => leg.shape).join("");
 
+  let coordinates = decodePolyline6(shape);
+  let distanceKm = body.trip.summary.length;
+
+  // Valhalla snaps both ends to the nearest routable edge (a road or path) —
+  // buildings and other off-network points aren't part of the pedestrian
+  // graph. Extend the route with a straight "last mile" segment out to the
+  // actual requested point so travel visibly reaches the door, not just the
+  // street outside it.
+  const snappedOrigin: LatLng = { lat: coordinates[0][1], lng: coordinates[0][0] };
+  const originGapKm = haversineKm(origin, snappedOrigin);
+  if (originGapKm > LAST_MILE_THRESHOLD_KM) {
+    coordinates = [[origin.lng, origin.lat], ...coordinates];
+    distanceKm += originGapKm;
+  }
+
+  const snappedDestination: LatLng = {
+    lat: coordinates[coordinates.length - 1][1],
+    lng: coordinates[coordinates.length - 1][0],
+  };
+  const destinationGapKm = haversineKm(destination, snappedDestination);
+  if (destinationGapKm > LAST_MILE_THRESHOLD_KM) {
+    coordinates = [...coordinates, [destination.lng, destination.lat]];
+    distanceKm += destinationGapKm;
+  }
+
   return {
-    route: { type: "LineString", coordinates: decodePolyline6(shape) },
-    distanceKm: body.trip.summary.length,
+    route: { type: "LineString", coordinates },
+    distanceKm,
   };
 }

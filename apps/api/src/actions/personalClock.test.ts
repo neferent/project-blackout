@@ -1,5 +1,7 @@
+import { DISCONNECT_ACTION_GAME_SECONDS } from "@blackout/shared";
 import { describe, expect, it } from "vitest";
 import "./travel.js"; // registers the travel handler
+import "./disconnect.js"; // registers the disconnect handler
 import { computePersonalClock } from "./personalClock.js";
 
 describe("computePersonalClock", () => {
@@ -55,5 +57,19 @@ describe("computePersonalClock", () => {
     const clock = computePersonalClock(createdAt, [first, second], now);
 
     expect(clock.getTime() - createdAt.getTime()).toBe((3600 + 7200) * 1000);
+  });
+
+  it("credits the fixed disconnect duration regardless of its data", () => {
+    const startsAt = new Date("2026-01-01T00:00:00Z");
+    const endsAt = new Date("2026-01-01T00:00:30Z");
+    const now = new Date("2026-01-01T00:05:00Z"); // well after completion
+
+    const clock = computePersonalClock(
+      createdAt,
+      [{ kind: "disconnect", data: { buildingOsmType: "way", buildingOsmId: "1", position: { lat: 0, lng: 0 } }, startsAt, endsAt }],
+      now,
+    );
+
+    expect(clock.getTime() - createdAt.getTime()).toBe(DISCONNECT_ACTION_GAME_SECONDS * 1000);
   });
 });

@@ -1,17 +1,27 @@
 import { Hono } from "hono";
-import { sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   actionSchema,
+  DISCONNECT_ACTION_GAME_SECONDS,
+  DISCONNECT_MAX_DISTANCE_METERS,
+  haversineKm,
   realSecondsFromGameSeconds,
   gameSecondsForDistance,
+  lineIntersectsPolygon,
+  startDisconnectRequestSchema,
   startTravelRequestSchema,
+  travelHistoryResponseSchema,
+  type DisconnectActionData,
+  type TravelActionData,
 } from "@blackout/shared";
 import { db } from "../db/client.js";
 import { actions } from "../db/schema.js";
 import { requireAnonKey } from "../identity/anonPlayer.js";
 import { resolvePlayerState, hasActiveTrip } from "../state/playerState.js";
 import { requestPedestrianRoute } from "../services/valhalla.js";
+import { dangerProvider } from "../services/dangerProvider.js";
 import { stubEncounterPlanner } from "../services/encounterPlanner.js";
+import { centroidOfOutline, findBuildingByOsmId, setBuildingConnectedToGrid } from "../services/buildingLookupCache.js";
 
 export const actionsRoute = new Hono();
 
@@ -27,7 +37,22 @@ actionsRoute.post("/travel", requireAnonKey, async (c) => {
     return c.json({ error: "Player already has an active trip" }, 409);
   }
 
-  const { route, distanceKm } = await requestPedestrianRoute(state.position, body.destination);
+  // Routing goes through DangerProvider before touching Valhalla. If the direct
+  // route crosses a known danger zone and the player asked for the avoiding
+  // route (the default — see startTravelRequestSchema), swap in a route with
+  // that zone excluded. "direct" is honored even if it cuts through danger —
+  // that's the player's explicit choice.
+  const dangerZones = await dangerProvider.dangerZones();
+  let { route, distanceKm } = await requestPedestrianRoute(state.position, body.destination);
+  const crossedZones = dangerZones.filter((zone) => lineIntersectsPolygon(route.coordinates, zone));
+  if (crossedZones.length > 0 && body.routeChoice === "avoiding") {
+    const avoided = await requestPedestrianRoute(state.position, body.destination, crossedZones);
+    if (!crossedZones.some((zone) => lineIntersectsPolygon(avoided.route.coordinates, zone))) {
+      route = avoided.route;
+      distanceKm = avoided.distanceKm;
+    }
+  }
+
   const encounters = await stubEncounterPlanner.planEncounters(route);
 
   const gameSeconds = gameSecondsForDistance(distanceKm);
@@ -58,6 +83,59 @@ actionsRoute.post("/travel", requireAnonKey, async (c) => {
   return c.json(actionSchema.parse({ ...inserted, data }), 201);
 });
 
+actionsRoute.post("/disconnect", requireAnonKey, async (c) => {
+  const anonKey = c.get("anonKey");
+  const body = startDisconnectRequestSchema.parse(await c.req.json());
+
+  const state = await resolvePlayerState(anonKey);
+  if (!state) {
+    return c.json({ error: "Player not found" }, 404);
+  }
+
+  const building = await findBuildingByOsmId(body.osmType, body.osmId);
+  if (!building) {
+    return c.json({ error: "Building not found — look it up first" }, 404);
+  }
+  if (!building.connectedToGrid) {
+    return c.json({ error: "Building is already disconnected" }, 409);
+  }
+
+  const position = centroidOfOutline(building.outline);
+  const distanceM = haversineKm(state.position, position) * 1000;
+  if (distanceM > DISCONNECT_MAX_DISTANCE_METERS) {
+    return c.json({ error: "Too far from the building to disconnect it" }, 400);
+  }
+
+  const realSeconds = realSecondsFromGameSeconds(DISCONNECT_ACTION_GAME_SECONDS);
+  const startsAt = new Date();
+  const endsAt = new Date(startsAt.getTime() + realSeconds * 1000);
+
+  const data: DisconnectActionData = {
+    buildingOsmType: body.osmType,
+    buildingOsmId: body.osmId,
+    position,
+  };
+
+  const [inserted] = await db
+    .insert(actions)
+    .values({
+      playerId: state.player.id,
+      kind: "disconnect",
+      startsAt,
+      endsAt,
+      data,
+    })
+    .returning();
+
+  // Applied immediately rather than deferred to endsAt: this is a discrete
+  // one-time state flip, not a value resolved from elapsed time like position/
+  // clock are (see CLAUDE.md's server-time rule) — the action's duration only
+  // occupies the personal clock, per gameDurationSeconds in disconnect.ts.
+  await setBuildingConnectedToGrid(body.osmType, body.osmId, false);
+
+  return c.json(actionSchema.parse({ ...inserted, data }), 201);
+});
+
 actionsRoute.get("/current", requireAnonKey, async (c) => {
   const anonKey = c.get("anonKey");
   const state = await resolvePlayerState(anonKey);
@@ -65,4 +143,31 @@ actionsRoute.get("/current", requireAnonKey, async (c) => {
     return c.json({ error: "Player not found" }, 404);
   }
   return c.json({ activeAction: state.activeAction, position: state.position });
+});
+
+const TRAVEL_HISTORY_LIMIT = 5;
+
+/** The most recent completed trips' routes, for faded breadcrumbs of where the player's been. */
+actionsRoute.get("/history", requireAnonKey, async (c) => {
+  const anonKey = c.get("anonKey");
+  const state = await resolvePlayerState(anonKey);
+  if (!state) {
+    return c.json({ error: "Player not found" }, 404);
+  }
+
+  const now = new Date();
+  const rows = await db
+    .select()
+    .from(actions)
+    .where(and(eq(actions.playerId, state.player.id), eq(actions.kind, "travel")))
+    .orderBy(desc(actions.startsAt))
+    .limit(TRAVEL_HISTORY_LIMIT + 1); // +1: the in-progress trip (if any) is excluded below, not counted against the limit
+
+  const completed = rows.filter((a) => a.endsAt <= now).slice(0, TRAVEL_HISTORY_LIMIT);
+
+  return c.json(
+    travelHistoryResponseSchema.parse(
+      completed.map((a) => ({ id: a.id, route: (a.data as TravelActionData).route, endsAt: a.endsAt })),
+    ),
+  );
 });
