@@ -28,6 +28,7 @@ import {
   DISCONNECTED_SAFE_RADIUS_METERS,
   invalidateAreaDangerCacheNear,
 } from "../services/dangerProvider.js";
+import { activeLayoutAction } from "../services/layoutActions.js";
 import { stubEncounterPlanner } from "../services/encounterPlanner.js";
 import { centroidOfOutline, findBuildingByOsmId, setBuildingConnectedToGrid } from "../services/buildingLookupCache.js";
 
@@ -43,6 +44,10 @@ actionsRoute.post("/travel", requireAnonKey, async (c) => {
   }
   if (await hasActiveTrip(state.player.id)) {
     return c.json({ error: "Player already has an active trip" }, 409);
+  }
+  // Rearranging the base occupies the player entirely — nothing else can start.
+  if (await activeLayoutAction(state.player.id)) {
+    return c.json({ error: "Player is busy rearranging their base" }, 409);
   }
 
   // Authoritative "which hex did you actually pick" — independent of whatever
@@ -103,6 +108,10 @@ actionsRoute.post("/disconnect", requireAnonKey, async (c) => {
   const state = await resolvePlayerState(anonKey);
   if (!state) {
     return c.json({ error: "Player not found" }, 404);
+  }
+
+  if (await activeLayoutAction(state.player.id)) {
+    return c.json({ error: "Player is busy rearranging their base" }, 409);
   }
 
   const building = await findBuildingByOsmId(body.osmType, body.osmId);

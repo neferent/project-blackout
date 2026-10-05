@@ -6,10 +6,11 @@ import {
   interactionCellCenter,
   interactionCellForPosition,
   MIN_BASE_BUILDING_CELLS,
+  tilesFromHexGrid,
   playerStateSchema,
 } from "@blackout/shared";
 import { db } from "../db/client.js";
-import { bases, players } from "../db/schema.js";
+import { baseTiles, bases, players } from "../db/schema.js";
 import { cellForPosition } from "../lib/h3.js";
 import { requireAnonKey } from "../identity/anonPlayer.js";
 import { resolvePlayerState } from "../state/playerState.js";
@@ -49,12 +50,16 @@ playersRoute.post("/", requireAnonKey, async (c) => {
       )
       returning id
     `);
-    await tx.insert(bases).values({
-      playerId: player.id,
-      hexCell: baseCell,
-      radius: body.grid.radius,
-      gridData: body.grid,
-    });
+    const [base] = await tx
+      .insert(bases)
+      .values({
+        playerId: player.id,
+        hexCell: baseCell,
+        radius: body.grid.radius,
+        gridData: body.grid,
+      })
+      .returning({ id: bases.id });
+    await tx.insert(baseTiles).values(tilesFromHexGrid(body.grid).map((t) => ({ baseId: base.id, ...t })));
   });
 
   const state = await resolvePlayerState(anonKey);

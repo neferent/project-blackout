@@ -127,9 +127,29 @@ have `baseGrid: null`. A base can eventually own multiple hexes (expansion), and
 can eventually own multiple bases — the 2nd/3rd base or additional hex has a steep cost,
 not yet designed; that's when `base_hexes` would actually earn its keep. If the preview
 grid ever proves too distorted to be fair gameplay ground truth, authoritative OSM
-re-derivation is the fallback plan, not a given. Phase 3 (not built) is actual placement:
-persisting what's in each cell, and the adjacency-bonus system itself (time-cost
-modifiers between touching item pairs).
+re-derivation is the fallback plan, not a given.
+
+## Base layout
+
+Placement and the efficiency bonuses are built; see `docs/base-layout.md` for the rule
+config format. In short:
+
+- **Rules are data in `packages/shared/src/baseLayout/`** (item definitions, synergies,
+  hazards, cap, cost constants). Pure functions (`validateLayout`, `evaluateLayout`,
+  `planLayoutCommit`, `draft.ts`) run on both client (free plan-mode preview) and server
+  (validation, pricing). Don't copy rule logic into either app.
+- **Tables:** `base_tiles` (typed tiles, authoritative for rules; `bases.grid_data` is only
+  the creation-time preview), `items` (tradable instances with quality; `definition_id` is
+  a config key, not an FK), `placements`. `bases.layout_version` and a cached
+  `layout_efficiency` are invalidated when a layout commit finalizes.
+- **Commit is an action.** `POST /base/layout/commit` creates a `layout` action
+  (`apps/api/src/actions/layout.ts`) whose duration is the server-computed diff cost. The
+  new placements apply lazily on the first read after `ends_at` (`finalizeLayoutIfDone`),
+  the same read-time pattern as finishing a trip. While it runs the base is locked and
+  travel/disconnect are refused.
+- **Stubs:** `itemGrantProvider.ts` grants a starter kit (replace with real acquisition);
+  `getBaseLayoutConfig()` returns the seed (swap for a stored config later). Tile
+  conversion is not built.
 
 ## Identity
 

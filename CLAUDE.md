@@ -27,6 +27,12 @@ must-not-violate rules.
   anonPlayer.ts` and `apps/web/src/identity/anonPlayerId.ts`. Don't leak this scheme into
   other modules — they should only ever see a resolved player.
 
+- **Base-layout rules are data in `packages/shared/src/baseLayout/`** (item defs, synergies,
+  hazards, cap, cost constants) and evaluated by shared pure functions on both client and
+  server. Don't hard-code a rule, bonus or cost in an app or a route, and don't trust a
+  client-supplied layout cost or duration — `POST /base/layout/commit` re-validates and
+  re-prices. Config format: `docs/base-layout.md`.
+
 ## Stack specifics
 
 - pnpm monorepo: `apps/web` (Vue 3 + Vite, Pinia, TanStack Query, MapLibre GL JS), `apps/api`
@@ -63,7 +69,8 @@ must-not-violate rules.
 
 ## Out of scope (don't build unless asked)
 
-Scavenging, inventory, crafting, shelters/devices, real encounters, NPCs, multiplayer,
-deployment. The power-grid danger mechanic and base placement/hex grid are in scope and
-partially built — see ARCHITECTURE.md ("Base hex grid") and memory for current phase
-status before picking up work there.
+Scavenging, real inventory/acquisition/trading, crafting execution, real encounters, NPCs,
+multiplayer, deployment, tile conversion, saved/shared layouts. The power-grid danger
+mechanic and the base hex grid + layout system are in scope and partially built — see
+ARCHITECTURE.md ("Base hex grid", "Base layout") and memory for current phase status before
+picking up work there.

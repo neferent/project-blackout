@@ -62,7 +62,7 @@ export type Base = z.infer<typeof baseSchema>;
  * Action kinds. The registry is built to accept more (scavenge, craft, rest, ...)
  * without changing this list's consumers.
  */
-export const actionKindSchema = z.enum(["travel", "disconnect"]);
+export const actionKindSchema = z.enum(["travel", "disconnect", "layout"]);
 export type ActionKind = z.infer<typeof actionKindSchema>;
 
 export const travelActionDataSchema = z.object({

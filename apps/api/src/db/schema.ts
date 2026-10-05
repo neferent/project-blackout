@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, customType, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, customType, index, integer, jsonb, numeric, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 /** PostGIS geometry column, SRID 4326 (WGS84 lat/lng). */
 const geometryPoint = customType<{ data: string; driverData: string }>({
@@ -64,8 +64,71 @@ export const bases = pgTable("bases", {
   hexCell: h3Index("hex_cell").notNull(),
   radius: integer("radius").notNull(),
   gridData: jsonb("grid_data").notNull(),
+  // Bumped each time a layout commit finalizes; `layoutEfficiency` is the cached
+  // evaluateLayout() result for the current layout (null = recompute on next read).
+  layoutVersion: integer("layout_version").notNull().default(0),
+  layoutEfficiency: jsonb("layout_efficiency"),
+  starterKitGranted: boolean("starter_kit_granted").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * One row per board cell with its typed tile (indoor/yard/garden/paved/water/road),
+ * derived from `bases.gridData` at creation. This — not grid_data — is authoritative
+ * for layout rules, since tile conversion will mutate it (`convertedFrom`).
+ */
+export const baseTiles = pgTable(
+  "base_tiles",
+  {
+    baseId: uuid("base_id")
+      .notNull()
+      .references(() => bases.id, { onDelete: "cascade" }),
+    q: integer("q").notNull(),
+    r: integer("r").notNull(),
+    tileType: text("tile_type").notNull(),
+    convertedFrom: text("converted_from"),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.baseId, table.q, table.r] }),
+  }),
+);
+
+/**
+ * Item instances: each has its own quality and owner (tradable later — transfer is an
+ * UPDATE of owner_player_id). `definitionId` is a key into the base-layout config, never
+ * a foreign key (rules live in config, not the DB).
+ */
+export const items = pgTable("items", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  ownerPlayerId: uuid("owner_player_id")
+    .notNull()
+    .references(() => players.id, { onDelete: "cascade" }),
+  definitionId: text("definition_id").notNull(),
+  quality: numeric("quality", { precision: 5, scale: 2 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Where an item instance currently sits in a base. An item is placed at most once. */
+export const placements = pgTable(
+  "placements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    baseId: uuid("base_id")
+      .notNull()
+      .references(() => bases.id, { onDelete: "cascade" }),
+    itemId: uuid("item_id")
+      .notNull()
+      .unique()
+      .references(() => items.id, { onDelete: "cascade" }),
+    q: integer("q").notNull(),
+    r: integer("r").notNull(),
+    facing: integer("facing").notNull(),
+    kind: text("kind").notNull(),
+  },
+  (table) => ({
+    tileUnique: uniqueIndex("placements_base_tile_unique").on(table.baseId, table.q, table.r),
+  }),
+);
 
 /**
  * Generic action log: travel today, scavenge/craft/rest later. Server never
