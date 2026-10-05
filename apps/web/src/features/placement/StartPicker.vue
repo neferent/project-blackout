@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
+import { interactionCellCenter, interactionCellForPosition } from "@blackout/shared";
 import { useMapStore } from "../../stores/mapStore.js";
 import { usePlayerStore } from "../../stores/playerStore.js";
 import { config } from "../../config.js";
-import { searchPlaces, type NominatimResult } from "../../geo/nominatim.js";
+import { reverseGeocode, searchPlaces, type NominatimResult } from "../../geo/nominatim.js";
+import { ensureHomeBaseHighlightLayer, setHomeBaseHighlight } from "../travel/HomeBaseHighlightLayer.js";
+import { classifyHexGrid, hexGridWarning, type HexGridResult } from "./hexGrid.js";
+import HexPreviewPopover from "./HexPreviewPopover.vue";
 
 const emit = defineEmits<{ placed: [] }>();
 
@@ -14,21 +18,70 @@ const playerStore = usePlayerStore();
 const query = ref("");
 const results = ref<NominatimResult[]>([]);
 const pending = ref<{ lat: number; lng: number } | null>(null);
+const pendingCell = ref<string | null>(null);
 const searching = ref(false);
 const creating = ref(false);
 let marker: maplibregl.Marker | null = null;
 let searchDebounce: ReturnType<typeof setTimeout> | undefined;
 let clickHandler: ((e: maplibregl.MapMouseEvent) => void) | null = null;
 
+// One combined popover (grid + stats + confirm, see HexPreviewPopover) shown next to
+// whatever hex is clicked — no separate "browsing" vs. "chosen" screen.
+const grid = ref<HexGridResult | null>(null);
+
+// Screen position of the previewed hex, kept in sync with map pans/zooms so the popover
+// tracks the tile instead of drifting from it (see attachClickHandler/reposition below).
+const popoverAnchor = ref<{ x: number; y: number } | null>(null);
+const cityName = ref<string | null>(null);
+const cityLoading = ref(false);
+let cityRequestId = 0;
+let moveHandler: (() => void) | null = null;
+
+function repositionPopover() {
+  const map = mapStore.map;
+  if (!map || !pending.value) return;
+  const point = map.project([pending.value.lng, pending.value.lat]);
+  popoverAnchor.value = { x: point.x, y: point.y };
+}
+
+function refreshGrid() {
+  const map = mapStore.map;
+  if (!map || !pendingCell.value) return;
+  grid.value = classifyHexGrid(map, pendingCell.value);
+}
+
+async function refreshCityName(position: { lat: number; lng: number }) {
+  const requestId = ++cityRequestId;
+  cityLoading.value = true;
+  try {
+    const result = await reverseGeocode(position).catch(() => null);
+    if (requestId !== cityRequestId) return; // a later click superseded this one
+    cityName.value = result?.city ?? null;
+  } finally {
+    if (requestId === cityRequestId) cityLoading.value = false;
+  }
+}
+
+/** Snaps the click to the resolution-11 hex it falls in and shows the marker at that
+ * hex's center — the actual base position that'll be created (see Part B/C: the server
+ * snaps to this same hex's center). */
 function setPending(position: { lat: number; lng: number }) {
-  pending.value = position;
+  const cell = interactionCellForPosition(position);
+  const center = interactionCellCenter(cell);
+  pending.value = center;
+  pendingCell.value = cell;
   const map = mapStore.map;
   if (!map) return;
   if (!marker) {
-    marker = new maplibregl.Marker({ color: "#c94f3f" }).setLngLat([position.lng, position.lat]).addTo(map);
+    marker = new maplibregl.Marker({ color: "#c94f3f" }).setLngLat([center.lng, center.lat]).addTo(map);
   } else {
-    marker.setLngLat([position.lng, position.lat]);
+    marker.setLngLat([center.lng, center.lat]);
   }
+  ensureHomeBaseHighlightLayer(map);
+  setHomeBaseHighlight(map, cell);
+  refreshGrid();
+  repositionPopover();
+  refreshCityName(center);
 }
 
 function attachClickHandler() {
@@ -36,6 +89,8 @@ function attachClickHandler() {
   if (!map) return;
   clickHandler = (e) => setPending({ lat: e.lngLat.lat, lng: e.lngLat.lng });
   map.on("click", clickHandler);
+  moveHandler = () => repositionPopover();
+  map.on("move", moveHandler);
 }
 
 watch(
@@ -68,7 +123,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (clickHandler && mapStore.map) mapStore.map.off("click", clickHandler);
+  if (moveHandler && mapStore.map) mapStore.map.off("move", moveHandler);
   marker?.remove();
+  if (mapStore.map) setHomeBaseHighlight(mapStore.map, null);
 });
 
 watch(query, (value) => {
@@ -96,10 +153,12 @@ function selectResult(result: NominatimResult) {
 }
 
 async function confirm() {
-  if (!pending.value) return;
+  if (!pending.value || !grid.value) return;
+  const warning = hexGridWarning(grid.value);
+  if (warning === "no-buildings" || warning === "too-few-buildings") return;
   creating.value = true;
   try {
-    await playerStore.create(pending.value);
+    await playerStore.create(pending.value, grid.value);
     emit("placed");
   } finally {
     creating.value = false;
@@ -119,13 +178,18 @@ async function confirm() {
       </li>
     </ul>
 
-    <div class="footer">
-      <span v-if="pending" class="pending">{{ pending.lat.toFixed(4) }}, {{ pending.lng.toFixed(4) }}</span>
-      <button :disabled="!pending || creating" @click="confirm">
-        {{ creating ? "Placing..." : "Confirm start point" }}
-      </button>
-    </div>
+    <span v-if="pending" class="pending">{{ pending.lat.toFixed(4) }}, {{ pending.lng.toFixed(4) }}</span>
   </div>
+
+  <HexPreviewPopover
+    v-if="popoverAnchor"
+    :grid="grid"
+    :city="cityName"
+    :city-loading="cityLoading"
+    :creating="creating"
+    :anchor="popoverAnchor"
+    @confirm="confirm"
+  />
 </template>
 
 <style scoped>
@@ -134,7 +198,7 @@ async function confirm() {
   left: 50%;
   bottom: 32px;
   transform: translateX(-50%);
-  width: min(420px, 90vw);
+  width: min(480px, 90vw);
   background: rgba(15, 15, 14, 0.92);
   border: 1px solid #2a2a26;
   border-radius: 8px;
@@ -177,27 +241,10 @@ input {
 .results li:hover {
   background: #26261f;
 }
-.footer {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
 .pending {
+  display: block;
+  margin-top: 12px;
   font-size: 12px;
   color: #8a8578;
-}
-button {
-  background: #c94f3f;
-  color: #fff;
-  border: none;
-  padding: 8px 14px;
-  border-radius: 4px;
-  cursor: pointer;
-}
-button:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 </style>

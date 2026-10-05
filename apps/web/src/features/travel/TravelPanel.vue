@@ -1,8 +1,21 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
 import type { Map as MapLibreMap, MapMouseEvent } from "maplibre-gl";
-import type { LatLng, LineStringGeometry, RoutePreviewResponse, TravelHistoryResponse } from "@blackout/shared";
-import { interpolateAlongLine, travelHistoryResponseSchema, tripProgress } from "@blackout/shared";
+import type {
+  AreaCellDanger,
+  BuildingInZone,
+  LatLng,
+  LineStringGeometry,
+  RoutePreviewResponse,
+  TravelHistoryResponse,
+} from "@blackout/shared";
+import {
+  interactionCellCenter,
+  interactionCellForPosition,
+  interpolateAlongLine,
+  travelHistoryResponseSchema,
+  tripProgress,
+} from "@blackout/shared";
 import { useMapStore } from "../../stores/mapStore.js";
 import { usePlayerStore } from "../../stores/playerStore.js";
 import { apiClient } from "../../api/client.js";
@@ -13,14 +26,12 @@ import { ensureBuildingHighlightLayer, setBuildingHighlight } from "./BuildingHi
 import { ensureHomeBaseHighlightLayer, setHomeBaseHighlight } from "./HomeBaseHighlightLayer.js";
 import { ensureActiveRouteLayer, setActiveRoute } from "./ActiveRouteLayer.js";
 import { ensureRouteHistoryLayer, setRouteHistory } from "./RouteHistoryLayer.js";
-import { ensureDecayZoneLayer, setDecayZones } from "../decay/DecayZoneLayer.js";
+import { ensureAreaDangerLayer, setAreaDanger } from "../decay/AreaDangerLayer.js";
 import {
   ensureDecayBuildingHighlightLayer,
   setDecayBuildingHighlights,
 } from "../decay/DecayBuildingHighlightLayer.js";
-import { describePlace, reverseGeocode } from "../../geo/nominatim.js";
-import { describeBuilding, findBuildingAt } from "../../geo/buildings.js";
-import { fetchZoneBuildings, fetchZonesInViewport } from "../../geo/zones.js";
+import { fetchBuildingsInCell, fetchZonesInViewport } from "../../geo/zones.js";
 
 const mapStore = useMapStore();
 const playerStore = usePlayerStore();
@@ -30,7 +41,6 @@ const pendingDestination = ref<LatLng | null>(null);
 const previewing = ref(false);
 const starting = ref(false);
 const destinationPlace = ref<string | null>(null);
-const destinationContains = ref<{ name: string; kind: string }[]>([]);
 const placeLoading = ref(false);
 const remaining = ref<{ distanceKm: number; realSeconds: number; gameSeconds: number } | null>(null);
 const routeHistory = ref<TravelHistoryResponse>([]);
@@ -40,6 +50,11 @@ let moveEndHandler: (() => void) | null = null;
 // pattern as destinationRequestId below) — pan/zoom fires "moveend" far more
 // often than any single fetch resolves.
 let zoneRequestId = 0;
+// Accumulates every danger cell (and, for off-limits ones, their resolved buildings) seen
+// across pans — once rendered, a cell stays rendered even after panning away, rather than
+// popping out just because it's left the current viewport (see refreshDangerZones).
+const seenDangerCells = new Map<string, AreaCellDanger>();
+const seenOffLimitsBuildings = new Map<string, BuildingInZone[]>();
 let animationFrame: number | null = null;
 let pollInterval: ReturnType<typeof setInterval> | undefined;
 // Guards against a slow lookup for an earlier click overwriting a faster
@@ -59,44 +74,33 @@ function formatDuration(totalSeconds: number): string {
 }
 
 /**
- * What's at the clicked point. Finds the building polygon there (point-in-
- * polygon containment, not nearest-point) and highlights it, listing every
- * other shop/amenity feature whose point falls inside that same polygon —
- * so a store's separately-mapped sub-departments (pharmacy, garden center,
- * ...) show up as *contents* of the store, not as the answer itself.
- * Nominatim's reverse endpoint is kept only as a fallback for points with no
- * nearby building (open land, streets, ...).
+ * What's in the destination hex. The hex itself is resolved instantly and
+ * client-side (interactionCellForPosition, no network round-trip) so the
+ * amber outline appears the moment you click; only the buildings list comes
+ * from the server, and it's resolved from the same per-cell Overpass cache
+ * used for danger-zone building highlights (findOrFetchBuildingsInCell) — a
+ * click anywhere within an already-seen hex is a cache hit, not a fresh
+ * Overpass query, unlike the old per-point building lookup this replaces.
  */
-async function describeDestination(destination: LatLng, requestId: number): Promise<void> {
-  const map = mapStore.map;
-  const building = await findBuildingAt(destination).catch(() => null);
+async function describeDestination(cell: string, requestId: number): Promise<void> {
+  const buildings = await fetchBuildingsInCell(cell).catch(() => []);
   if (requestId !== destinationRequestId) return; // a later click superseded this one
 
-  if (building) {
-    destinationPlace.value = describeBuilding(building);
-    destinationContains.value = building.contains;
-    if (map) setBuildingHighlight(map, building.outline);
-    return;
-  }
-
-  if (map) setBuildingHighlight(map, null);
-  const nominatimPlace = await reverseGeocode(destination).catch(() => null);
-  if (requestId !== destinationRequestId) return;
-
-  destinationPlace.value = nominatimPlace ? describePlace(nominatimPlace) : "Unknown";
-  destinationContains.value = [];
+  destinationPlace.value = buildings.length > 0 ? `${buildings.length} building${buildings.length === 1 ? "" : "s"}` : "Open area";
 }
 
-/** Looks up and highlights what's at a point without touching travel state — safe to
+/** Looks up and highlights what's in a hex without touching travel state — safe to
  * call while already traveling, when starting a new trip isn't possible but inspecting
  * what's out there still should be. */
-function inspectDestination(destination: LatLng) {
+function inspectDestination(point: LatLng) {
+  const cell = interactionCellForPosition(point);
   destinationPlace.value = null;
-  destinationContains.value = [];
   placeLoading.value = true;
+  const map = mapStore.map;
+  if (map) setBuildingHighlight(map, cell);
 
   const requestId = ++destinationRequestId;
-  describeDestination(destination, requestId).finally(() => {
+  describeDestination(cell, requestId).finally(() => {
     if (requestId === destinationRequestId) placeLoading.value = false;
   });
 }
@@ -104,23 +108,26 @@ function inspectDestination(destination: LatLng) {
 function dismissInspect() {
   destinationRequestId++;
   destinationPlace.value = null;
-  destinationContains.value = [];
   placeLoading.value = false;
   const map = mapStore.map;
   if (map) setBuildingHighlight(map, null);
 }
 
-async function requestPreview(destination: LatLng) {
+async function requestPreview(point: LatLng) {
   if (!playerStore.state || isTraveling()) return;
+  const cell = interactionCellForPosition(point);
+  const destination = interactionCellCenter(cell); // trips always resolve hex-center to hex-center
   previewing.value = true;
   pendingDestination.value = destination;
   destinationPlace.value = null;
-  destinationContains.value = [];
   placeLoading.value = true;
 
-  // Fetched in parallel: what's-at-this-point doesn't need to block the route preview.
+  const map = mapStore.map;
+  if (map) setBuildingHighlight(map, cell);
+
+  // Fetched in parallel: what's-in-this-hex doesn't need to block the route preview.
   const requestId = ++destinationRequestId;
-  describeDestination(destination, requestId).finally(() => {
+  describeDestination(cell, requestId).finally(() => {
     if (requestId === destinationRequestId) placeLoading.value = false;
   });
 
@@ -129,7 +136,6 @@ async function requestPreview(destination: LatLng) {
       origin: playerStore.state.position,
       destination,
     });
-    const map = mapStore.map;
     if (map) {
       setRoutePreview(map, preview.value.route);
       setAvoidingRoutePreview(map, preview.value.avoidingDanger?.route ?? null);
@@ -144,7 +150,6 @@ function cancelPreview() {
   preview.value = null;
   pendingDestination.value = null;
   destinationPlace.value = null;
-  destinationContains.value = [];
   placeLoading.value = false;
   const map = mapStore.map;
   if (map) {
@@ -177,16 +182,21 @@ async function returnHome() {
 }
 
 /**
- * Pulls only the zones intersecting the map's current viewport (shapes, not
- * building lists — see fetchZonesInViewport) and renders them, then pulls
- * each visible zone's persisted building list in parallel and merges them
- * into one combined highlight. Re-run on every "moveend" since which zones
- * are in view changes as the map pans/zooms.
+ * Pulls every non-safe-tier AREA_H3_RESOLUTION cell intersecting the map's
+ * current viewport (see fetchZonesInViewport) and merges them into
+ * seenDangerCells, then renders the full accumulated set — so a cell stays
+ * rendered once seen, rather than disappearing just because it's panned out
+ * of view (danger zones are a persistent fact about the world, not a
+ * viewport-scoped overlay). Building highlights for the most severe tier
+ * ("off-limits") accumulate the same way, and are only fetched for cells not
+ * already resolved — querying every dangerous cell's buildings on every pan
+ * would fan out too many Overpass calls against its self-throttle.
+ * Re-run on every "moveend" since which cells are newly in view changes.
  */
 async function refreshDangerZones(map: MapLibreMap) {
   const requestId = ++zoneRequestId;
   const bounds = map.getBounds();
-  const zones = await fetchZonesInViewport({
+  const cells = await fetchZonesInViewport({
     minLat: bounds.getSouth(),
     minLng: bounds.getWest(),
     maxLat: bounds.getNorth(),
@@ -194,11 +204,16 @@ async function refreshDangerZones(map: MapLibreMap) {
   }).catch(() => []);
   if (requestId !== zoneRequestId) return; // a later "moveend" superseded this one
 
-  setDecayZones(map, zones.map((zone) => zone.polygon));
+  for (const cell of cells) seenDangerCells.set(cell.cell, cell);
+  setAreaDanger(map, [...seenDangerCells.values()]);
 
-  const buildingLists = await Promise.all(zones.map((zone) => fetchZoneBuildings(zone.id).catch(() => [])));
+  const newOffLimitsCells = cells.filter((c) => c.tier === "off-limits" && !seenOffLimitsBuildings.has(c.cell));
+  const buildingLists = await Promise.all(
+    newOffLimitsCells.map((c) => fetchBuildingsInCell(c.cell).catch(() => [])),
+  );
   if (requestId !== zoneRequestId) return;
-  setDecayBuildingHighlights(map, buildingLists.flat());
+  newOffLimitsCells.forEach((c, i) => seenOffLimitsBuildings.set(c.cell, buildingLists[i]));
+  setDecayBuildingHighlights(map, [...seenOffLimitsBuildings.values()].flat());
 }
 
 async function refreshRouteHistory() {
@@ -294,7 +309,7 @@ function setup(map: MapLibreMap) {
   ensurePlayerMarkerLayer(map);
   ensureBuildingHighlightLayer(map);
   ensureHomeBaseHighlightLayer(map);
-  ensureDecayZoneLayer(map);
+  ensureAreaDangerLayer(map);
   ensureDecayBuildingHighlightLayer(map);
   refreshDangerZones(map);
   moveEndHandler = () => refreshDangerZones(map);
@@ -306,11 +321,9 @@ function setup(map: MapLibreMap) {
     // Recenter on the player's actual game position — the map otherwise sits
     // at the config default center until something else moves it.
     map.jumpTo({ center: [playerStore.state.position.lng, playerStore.state.position.lat], zoom: 15 });
-    // Base position is fixed for the POC (see BaseMarkerLayer) — resolve its
-    // building once rather than re-querying on every render.
-    findBuildingAt(playerStore.state.basePosition)
-      .then((building) => setHomeBaseHighlight(map, building?.outline ?? null))
-      .catch(() => setHomeBaseHighlight(map, null));
+    // Base hex is fixed for the POC (see BaseMarkerLayer) and already known client-side —
+    // no lookup needed, unlike the old per-building resolution this replaced.
+    setHomeBaseHighlight(map, playerStore.state.baseH3Cell);
   }
 
   clickHandler = (e) => {
@@ -354,9 +367,6 @@ onUnmounted(() => {
     <div class="destination-type">
       {{ placeLoading ? "Looking up destination…" : destinationPlace ?? "Unknown" }}
     </div>
-    <ul v-if="destinationContains.length" class="contains-list">
-      <li v-for="item in destinationContains" :key="item.name">{{ item.name }} ({{ item.kind }})</li>
-    </ul>
     <div class="stat"><span>Distance</span><strong>{{ preview.distanceKm.toFixed(2) }} km</strong></div>
     <div class="stat"><span>Game time</span><strong>{{ (preview.gameSeconds / 3600).toFixed(1) }} h</strong></div>
     <div class="stat"><span>Real time</span><strong>{{ Math.ceil(preview.realSeconds) }} s</strong></div>
@@ -383,14 +393,11 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <!-- Inspecting a building while already traveling: no route/Travel controls, just what's there. -->
+  <!-- Inspecting a hex while already traveling: no route/Travel controls, just what's there. -->
   <div v-else-if="isTraveling() && (placeLoading || destinationPlace)" class="travel-panel">
     <div class="destination-type">
       {{ placeLoading ? "Looking up destination…" : destinationPlace ?? "Unknown" }}
     </div>
-    <ul v-if="destinationContains.length" class="contains-list">
-      <li v-for="item in destinationContains" :key="item.name">{{ item.name }} ({{ item.kind }})</li>
-    </ul>
     <div class="actions">
       <button class="secondary" @click="dismissInspect">Close</button>
     </div>
@@ -438,18 +445,6 @@ onUnmounted(() => {
   justify-content: space-between;
   font-size: 13px;
   margin-bottom: 6px;
-}
-.contains-list {
-  list-style: none;
-  margin: 0 0 10px;
-  padding: 0;
-  font-size: 12px;
-  color: #a8a498;
-  border-bottom: 1px solid #2a2a26;
-  padding-bottom: 8px;
-}
-.contains-list li {
-  padding: 2px 0;
 }
 .danger-note {
   margin-top: 6px;

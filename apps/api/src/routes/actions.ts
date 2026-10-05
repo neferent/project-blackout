@@ -5,6 +5,8 @@ import {
   DISCONNECT_ACTION_GAME_SECONDS,
   DISCONNECT_MAX_DISTANCE_METERS,
   haversineKm,
+  interactionCellCenter,
+  interactionCellForPosition,
   realSecondsFromGameSeconds,
   gameSecondsForDistance,
   lineIntersectsPolygon,
@@ -19,7 +21,13 @@ import { actions } from "../db/schema.js";
 import { requireAnonKey } from "../identity/anonPlayer.js";
 import { resolvePlayerState, hasActiveTrip } from "../state/playerState.js";
 import { requestPedestrianRoute } from "../services/valhalla.js";
-import { dangerProvider } from "../services/dangerProvider.js";
+import { DANGER_FALLOFF_METERS } from "../services/dangerMath.js";
+import {
+  bboxAroundPoints,
+  dangerProvider,
+  DISCONNECTED_SAFE_RADIUS_METERS,
+  invalidateAreaDangerCacheNear,
+} from "../services/dangerProvider.js";
 import { stubEncounterPlanner } from "../services/encounterPlanner.js";
 import { centroidOfOutline, findBuildingByOsmId, setBuildingConnectedToGrid } from "../services/buildingLookupCache.js";
 
@@ -37,16 +45,21 @@ actionsRoute.post("/travel", requireAnonKey, async (c) => {
     return c.json({ error: "Player already has an active trip" }, 409);
   }
 
+  // Authoritative "which hex did you actually pick" — independent of whatever
+  // raw point the client sent. Trips always resolve hex-center to hex-center.
+  const destination = interactionCellCenter(interactionCellForPosition(body.destination));
+
   // Routing goes through DangerProvider before touching Valhalla. If the direct
   // route crosses a known danger zone and the player asked for the avoiding
   // route (the default — see startTravelRequestSchema), swap in a route with
   // that zone excluded. "direct" is honored even if it cuts through danger —
   // that's the player's explicit choice.
-  const dangerZones = await dangerProvider.dangerZones();
-  let { route, distanceKm } = await requestPedestrianRoute(state.position, body.destination);
+  const bbox = bboxAroundPoints([state.position, destination], DANGER_FALLOFF_METERS);
+  const dangerZones = await dangerProvider.dangerZones(bbox);
+  let { route, distanceKm } = await requestPedestrianRoute(state.position, destination);
   const crossedZones = dangerZones.filter((zone) => lineIntersectsPolygon(route.coordinates, zone));
   if (crossedZones.length > 0 && body.routeChoice === "avoiding") {
-    const avoided = await requestPedestrianRoute(state.position, body.destination, crossedZones);
+    const avoided = await requestPedestrianRoute(state.position, destination, crossedZones);
     if (!crossedZones.some((zone) => lineIntersectsPolygon(avoided.route.coordinates, zone))) {
       route = avoided.route;
       distanceKm = avoided.distanceKm;
@@ -62,7 +75,7 @@ actionsRoute.post("/travel", requireAnonKey, async (c) => {
 
   const data = {
     origin: state.position,
-    destination: body.destination,
+    destination,
     route,
     distanceKm,
     encounters,
@@ -132,6 +145,9 @@ actionsRoute.post("/disconnect", requireAnonKey, async (c) => {
   // clock are (see CLAUDE.md's server-time rule) — the action's duration only
   // occupies the personal clock, per gameDurationSeconds in disconnect.ts.
   await setBuildingConnectedToGrid(body.osmType, body.osmId, false);
+  // The disconnect can turn cached-dangerous cells near this building safe — see
+  // invalidateAreaDangerCacheNear's doc comment.
+  await invalidateAreaDangerCacheNear(position, DISCONNECTED_SAFE_RADIUS_METERS);
 
   return c.json(actionSchema.parse({ ...inserted, data }), 201);
 });

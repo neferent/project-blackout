@@ -20,10 +20,43 @@ export const playerSchema = z.object({
 });
 export type Player = z.infer<typeof playerSchema>;
 
+/** Mirrors HexCellClassification in apps/web/src/features/placement/hexGrid.ts. */
+export const hexCellClassificationSchema = z.enum(["building", "water", "road", "landcover", "empty"]);
+export type HexCellClassification = z.infer<typeof hexCellClassificationSchema>;
+
+export const hexCellDataSchema = z.object({
+  q: z.number(),
+  r: z.number(),
+  classification: hexCellClassificationSchema,
+});
+export type HexCellData = z.infer<typeof hexCellDataSchema>;
+
+/**
+ * The client-computed base board (see hexGrid.ts's classifyHexGrid) sent on create-player
+ * and persisted as-is (`bases.gridData`) — cosmetic/preview-grade even on the client
+ * (zoom-simplified vector tiles stretched onto a fixed board), so the server trusts it
+ * rather than re-deriving it from OSM. The server does re-check the building-count
+ * minimum before persisting, same rule as the client's hexGridWarning.
+ */
+export const hexGridResultSchema = z.object({
+  radius: z.number(),
+  cells: z.array(hexCellDataSchema),
+  coverage: z.record(hexCellClassificationSchema, z.number()),
+});
+export type HexGridResult = z.infer<typeof hexGridResultSchema>;
+
 export const createPlayerRequestSchema = z.object({
   position: latLngSchema,
+  grid: hexGridResultSchema,
 });
 export type CreatePlayerRequest = z.infer<typeof createPlayerRequestSchema>;
+
+export const baseSchema = z.object({
+  id: z.string().uuid(),
+  hexCell: z.string(),
+  grid: hexGridResultSchema,
+});
+export type Base = z.infer<typeof baseSchema>;
 
 /**
  * Action kinds. The registry is built to accept more (scavenge, craft, rest, ...)
@@ -149,17 +182,24 @@ const buildingInZoneSchema = z.object({
 });
 export type BuildingInZone = z.infer<typeof buildingInZoneSchema>;
 
-/** A zone's persisted building list (see GET /zones/:id/buildings). */
+/** A cell's resolved building list (see POST /zones/buildings-in-cell). */
 export const buildingsInZoneResponseSchema = z.array(buildingInZoneSchema);
 export type BuildingsInZoneResponse = z.infer<typeof buildingsInZoneResponseSchema>;
 
-/** A spawned danger zone's shape — all a client needs to render it. */
-export const dangerZoneShapeSchema = z.object({
-  id: z.string().uuid(),
-  // A closed ring (first point repeated as last).
-  polygon: z.array(latLngSchema).min(4),
+export const buildingsInCellRequestSchema = z.object({
+  cell: z.string(),
 });
-export type DangerZoneShape = z.infer<typeof dangerZoneShapeSchema>;
+export type BuildingsInCellRequest = z.infer<typeof buildingsInCellRequestSchema>;
+
+/** How dangerous an AREA_H3_RESOLUTION cell is — see dangerMath.ts's dangerTierFromValue. */
+export const dangerTierSchema = z.enum(["safe", "slightly-dangerous", "very-dangerous", "off-limits"]);
+export type DangerTier = z.infer<typeof dangerTierSchema>;
+
+export const areaCellDangerSchema = z.object({
+  cell: z.string(),
+  tier: dangerTierSchema,
+});
+export type AreaCellDanger = z.infer<typeof areaCellDangerSchema>;
 
 export const zonesInViewportRequestSchema = z.object({
   minLat: z.number(),
@@ -169,7 +209,8 @@ export const zonesInViewportRequestSchema = z.object({
 });
 export type ZonesInViewportRequest = z.infer<typeof zonesInViewportRequestSchema>;
 
-export const zonesInViewportResponseSchema = z.array(dangerZoneShapeSchema);
+/** Every non-safe-tier AREA_H3_RESOLUTION cell intersecting the viewport. */
+export const zonesInViewportResponseSchema = z.array(areaCellDangerSchema);
 export type ZonesInViewportResponse = z.infer<typeof zonesInViewportResponseSchema>;
 
 const viewportBoundsSchema = z.object({
@@ -193,23 +234,16 @@ export const powerInfrastructureInViewportResponseSchema = z.object({
 });
 export type PowerInfrastructureInViewportResponse = z.infer<typeof powerInfrastructureInViewportResponseSchema>;
 
-export const createDangerZoneRequestSchema = z.object({
-  center: latLngSchema,
-  // How far outside the zone's boundary to also resolve+persist buildings.
-  bufferMeters: z.number().nonnegative().default(50),
-});
-export type CreateDangerZoneRequest = z.infer<typeof createDangerZoneRequestSchema>;
-
-export const createDangerZoneResponseSchema = dangerZoneShapeSchema.extend({
-  buildingCount: z.number().int().nonnegative(),
-});
-export type CreateDangerZoneResponse = z.infer<typeof createDangerZoneResponseSchema>;
-
 /** Resolved, read-time view of a player: computed from their action history. */
 export const playerStateSchema = z.object({
   player: playerSchema,
   /** Fixed at creation: the player's base/shelter. Doesn't move with travel. */
   basePosition: latLngSchema,
+  /** The INTERACTION_H3_RESOLUTION cell the base occupies — basePosition is always this cell's center. */
+  baseH3Cell: z.string(),
+  // Null only for players created before base persistence existed — the hex was never
+  // thrown away going forward, but old rows have no bases row to back-fill it from.
+  baseGrid: hexGridResultSchema.nullable(),
   /** Current position: static when resting, interpolated while traveling. */
   position: latLngSchema,
   h3Cell: z.string(),

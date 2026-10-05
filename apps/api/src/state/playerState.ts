@@ -1,15 +1,17 @@
 import { and, desc, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 import {
+  interactionCellCenter,
   interpolateAlongLine,
   tripProgress,
   type Action,
+  type HexGridResult,
   type LatLng,
   type PlayerState,
   type TravelActionData,
 } from "@blackout/shared";
 import { db } from "../db/client.js";
-import { actions, players } from "../db/schema.js";
+import { actions, bases, players } from "../db/schema.js";
 import { cellForPosition } from "../lib/h3.js";
 import { computePersonalClock } from "../actions/personalClock.js";
 
@@ -55,6 +57,8 @@ export async function resolvePlayerState(anonKey: string): Promise<PlayerState |
 
   const h3Cell = cellForPosition(position);
 
+  const [base] = await db.select().from(bases).where(eq(bases.playerId, player.id)).limit(1);
+
   const personalClock = computePersonalClock(
     player.createdAt,
     playerActions.map((a) => ({ kind: a.kind as Action["kind"], data: a.data, startsAt: a.startsAt, endsAt: a.endsAt })),
@@ -63,7 +67,9 @@ export async function resolvePlayerState(anonKey: string): Promise<PlayerState |
 
   return {
     player: { id: player.id, anonKey: player.anonKey, createdAt: player.createdAt },
-    basePosition: { lat: player.baseLat, lng: player.baseLng },
+    basePosition: interactionCellCenter(player.baseH3Cell),
+    baseH3Cell: player.baseH3Cell,
+    baseGrid: (base?.gridData as HexGridResult | undefined) ?? null,
     position,
     h3Cell,
     personalClock,

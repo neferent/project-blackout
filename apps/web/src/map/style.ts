@@ -5,39 +5,17 @@ function slotted(slot: MapLayerSlot) {
   return { metadata: { slot } };
 }
 
-// Base (non-flickering) glow opacities, and the pathOpacity each style variant renders roads
-// at — exported so MapView.vue's flicker loop can compute each map's target opacity without
-// duplicating these numbers.
-export const ROAD_MINOR_GLOW_OPACITY = 0.22;
-export const ROAD_MAJOR_GLOW_OPACITY = 0.25;
-export const MAIN_PATH_OPACITY = 1;
-export const DISTORTED_PATH_OPACITY = 0.15;
+const BUILDING_OPACITY = 0.9;
 
-interface StyleVariantOptions {
-  /** Whether to include the place-name symbol layer. */
-  includeLabels: boolean;
-  /** line-opacity applied to the road layers — lower to fade paths out. */
-  pathOpacity: number;
-}
-
-function buildLayers({ includeLabels, pathOpacity }: StyleVariantOptions): LayerSpecification[] {
+function buildLayers(): LayerSpecification[] {
   const layers: LayerSpecification[] = [
     { id: "background", type: "background", paint: { "background-color": "#0b0c0d" }, ...slotted("basemap") },
-    // Speckle texture over the whole ground plane, underneath land/water/roads/buildings.
-    // The "ground-noise-pattern" image is registered on each Map instance at runtime (see
-    // MapView.vue) via createGroundNoiseImage — MapLibre renders nothing here until then.
-    {
-      id: "ground-noise",
-      type: "background",
-      paint: { "background-pattern": "ground-noise-pattern", "background-opacity": 0.25 },
-      ...slotted("basemap"),
-    },
     {
       id: "landcover",
       type: "fill",
       source: "openmaptiles",
       "source-layer": "landcover",
-      paint: { "fill-color": "#111213", "fill-opacity": 0.6 },
+      paint: { "fill-color": "#0c1a10", "fill-opacity": 0.6 },
       ...slotted("basemap"),
     },
     {
@@ -53,19 +31,17 @@ function buildLayers({ includeLabels, pathOpacity }: StyleVariantOptions): Layer
       type: "fill",
       source: "openmaptiles",
       "source-layer": "park",
-      paint: { "fill-color": "#141814", "fill-opacity": 0.5 },
+      paint: { "fill-color": "#0f2016", "fill-opacity": 0.5 },
       ...slotted("basemap"),
     },
-    // Dried/cracked ground texture (see noisePattern.ts's Voronoi-boundary technique).
-    // Placed after landcover/landuse/park so it shows on top of every land classification,
-    // but still before "water" so water paints back over it — a background layer would
-    // otherwise get buried under those fills' opacity, or (placed after water) show through
-    // on top of water, which doesn't make sense. "cracked-earth-pattern" is registered
-    // per-Map-instance at runtime in MapView.vue.
+    // Dedicated line layer for the same reason as water-stroke below: fill-outline-color
+    // alone is unreliable (1px, antialiased only, no width control).
     {
-      id: "ground-cracks",
-      type: "background",
-      paint: { "background-pattern": "cracked-earth-pattern", "background-opacity": 0.5 },
+      id: "park-stroke",
+      type: "line",
+      source: "openmaptiles",
+      "source-layer": "park",
+      paint: { "line-color": "#152a1c", "line-width": 1 },
       ...slotted("basemap"),
     },
     {
@@ -73,17 +49,18 @@ function buildLayers({ includeLabels, pathOpacity }: StyleVariantOptions): Layer
       type: "fill",
       source: "openmaptiles",
       "source-layer": "water",
-      paint: { "fill-color": "#0e1416", "fill-outline-color": "#2a4a46" },
+      paint: { "fill-color": "#0a1420", "fill-outline-color": "#1a2a3a" },
       ...slotted("basemap"),
     },
-    // Rippled texture over the flat water fill (see noisePattern.ts); "water-ripple-pattern"
-    // is registered per-Map-instance at runtime in MapView.vue.
+    // fill-outline-color on the fill layer above is unreliable (1px, antialiased only,
+    // no width control) — a dedicated line layer over the same source-layer gives a
+    // real, controllable stroke around every water body.
     {
-      id: "water-ripple",
-      type: "fill",
+      id: "water-stroke",
+      type: "line",
       source: "openmaptiles",
       "source-layer": "water",
-      paint: { "fill-pattern": "water-ripple-pattern", "fill-opacity": 0.25 },
+      paint: { "line-color": "#132330", "line-width": 1 },
       ...slotted("basemap"),
     },
     {
@@ -91,56 +68,7 @@ function buildLayers({ includeLabels, pathOpacity }: StyleVariantOptions): Layer
       type: "line",
       source: "openmaptiles",
       "source-layer": "waterway",
-      paint: { "line-color": "#0e1416", "line-width": 1, "line-opacity": pathOpacity },
-      ...slotted("basemap"),
-    },
-    // Glow layers sit directly under their crisp counterpart and use line-blur for a soft
-    // halo (MapLibre's built-in glow technique — no stacked/duplicate rendering needed).
-    // Scaled by pathOpacity so the glow fades along with the path on the distorted variant.
-    {
-      id: "road-minor-glow",
-      type: "line",
-      source: "openmaptiles",
-      "source-layer": "transportation",
-      filter: ["in", "class", "minor", "service", "track", "path"],
-      paint: {
-        "line-color": "#8a9a2a",
-        "line-width": 7,
-        "line-blur": 5,
-        "line-opacity": ROAD_MINOR_GLOW_OPACITY * pathOpacity,
-      },
-      ...slotted("basemap"),
-    },
-    {
-      id: "road-minor",
-      type: "line",
-      source: "openmaptiles",
-      "source-layer": "transportation",
-      filter: ["in", "class", "minor", "service", "track", "path"],
-      paint: { "line-color": "#2b2b29", "line-width": 1, "line-opacity": pathOpacity },
-      ...slotted("basemap"),
-    },
-    {
-      id: "road-major-glow",
-      type: "line",
-      source: "openmaptiles",
-      "source-layer": "transportation",
-      filter: ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"],
-      paint: {
-        "line-color": "#a8b83a",
-        "line-width": 9,
-        "line-blur": 6,
-        "line-opacity": ROAD_MAJOR_GLOW_OPACITY * pathOpacity,
-      },
-      ...slotted("basemap"),
-    },
-    {
-      id: "road-major",
-      type: "line",
-      source: "openmaptiles",
-      "source-layer": "transportation",
-      filter: ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"],
-      paint: { "line-color": "#3a3a35", "line-width": 1.5, "line-opacity": pathOpacity },
+      paint: { "line-color": "#141414", "line-width": 1 },
       ...slotted("basemap"),
     },
     {
@@ -149,66 +77,139 @@ function buildLayers({ includeLabels, pathOpacity }: StyleVariantOptions): Layer
       source: "openmaptiles",
       "source-layer": "boundary",
       filter: ["<=", "admin_level", 4],
-      paint: { "line-color": "#3a2f2a", "line-width": 0.75, "line-dasharray": [2, 2] },
+      paint: { "line-color": "#3a3a3a", "line-width": 0.75, "line-dasharray": [2, 2] },
       ...slotted("basemap"),
     },
+    // "overlay-under-buildings", not grouped with the rest of the basemap: roads still need
+    // their own slot after the ground layers, drawn before the building fill so a building
+    // simply paints over whatever road is under its footprint (plain painter's-algorithm
+    // draw order — the static array order below is what actually controls it; the slot
+    // metadata only governs where layers added later via registerMapLayer get inserted).
+    // A soft, blurred halo just under the (near-black) road line itself, slightly wider and
+    // barely lighter than the background. Against a background this dark, solid black roads
+    // would be invisible; the halo is what reads as the road "hovering" a touch above the flat
+    // ground rather than being painted flush onto it.
+    {
+      id: "road-minor-shadow",
+      type: "line",
+      source: "openmaptiles",
+      "source-layer": "transportation",
+      filter: ["in", "class", "minor", "service", "track"],
+      paint: {
+        "line-color": "#1c1c1c",
+        "line-opacity": 0.4,
+        "line-blur": 2,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2, 16, 4, 18, 7],
+      },
+      ...slotted("overlay-under-buildings"),
+    },
+    {
+      id: "road-minor",
+      type: "line",
+      source: "openmaptiles",
+      "source-layer": "transportation",
+      // "path" (footway/path/cycleway/steps — i.e. sidewalks) is deliberately left off: Valhalla
+      // routes pedestrians over that data regardless of what's rendered here, but drawing every
+      // sidewalk/crossing/alley alongside the roads it hugs was most of the map's visual clutter.
+      filter: ["in", "class", "minor", "service", "track"],
+      paint: {
+        "line-color": "#050505",
+        // Width scales with zoom so each line reads as the full road surface rather than a
+        // thin wire. This also matters for divided roads (see road-major below): OSM maps
+        // each carriageway of a dual-carriageway road as its own parallel way, and without
+        // zoom-scaled width those two ways render as two visibly separate thin lines instead
+        // of one road.
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1, 16, 2.5, 18, 5],
+      },
+      ...slotted("overlay-under-buildings"),
+    },
+    // Ramps/slip roads (interchange links) share their parent's "class" in OpenMapTiles
+    // (e.g. a motorway on-ramp is still class "motorway"), so without this split they'd
+    // render at full road-major width/color — at any real interchange that's a dozen
+    // overlapping full-strength lines. Drawn thinner/dimmer, and before road-major, so the
+    // through-road still reads clearly on top.
+    {
+      id: "road-ramp",
+      type: "line",
+      source: "openmaptiles",
+      "source-layer": "transportation",
+      filter: [
+        "all",
+        ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"],
+        ["==", "ramp", 1],
+      ],
+      paint: {
+        "line-color": "#262626",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 0.75, 16, 1.5, 18, 3],
+      },
+      ...slotted("overlay-under-buildings"),
+    },
+    // Same hover-halo treatment as road-minor-shadow above, scaled to road-major's width.
+    {
+      id: "road-major-shadow",
+      type: "line",
+      source: "openmaptiles",
+      "source-layer": "transportation",
+      filter: [
+        "all",
+        ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"],
+        ["!=", "ramp", 1],
+      ],
+      paint: {
+        "line-color": "#1c1c1c",
+        "line-opacity": 0.4,
+        "line-blur": 2,
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 3, 16, 6, 18, 12],
+      },
+      ...slotted("overlay-under-buildings"),
+    },
+    {
+      id: "road-major",
+      type: "line",
+      source: "openmaptiles",
+      "source-layer": "transportation",
+      filter: [
+        "all",
+        ["in", "class", "primary", "secondary", "tertiary", "trunk", "motorway"],
+        ["!=", "ramp", 1],
+      ],
+      paint: {
+        "line-color": "#050505",
+        // Wider than road-minor and grows faster with zoom, both because major roads are
+        // physically wider and so the two carriageways of a divided road (mapped as separate
+        // parallel OSM ways) merge visually into one band instead of reading as "lanes".
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 1.5, 16, 4, 18, 9],
+      },
+      ...slotted("overlay-under-buildings"),
+    },
+    // Flat, stylized 2D footprints — no fill-extrusion. Taller buildings still read as more
+    // scorched/damaged (darker), squat ones as more intact (lighter, slightly warmer), free
+    // variation from data already on the layer, no new assets. OpenMapTiles only carries
+    // render_height on some buildings; coalesce to a plausible low-rise default for the
+    // untagged ones.
     {
       id: "building",
-      type: "fill-extrusion",
+      type: "fill",
       source: "openmaptiles",
       "source-layer": "building",
       minzoom: 13,
       paint: {
-        // Taller buildings read as more scorched/damaged (darker), squat ones as more
-        // intact (lighter, slightly warmer) — free variation from data already on the
-        // layer, no new assets. Same coalesce-to-6 fallback as fill-extrusion-height below.
-        "fill-extrusion-color": [
+        "fill-color": [
           "interpolate",
           ["linear"],
           ["coalesce", ["get", "render_height"], 6],
           0,
-          "#2c2a22",
+          "#2a2a2a",
           15,
-          "#1e1e1c",
+          "#1e1e1e",
           40,
           "#101010",
         ],
-        // OpenMapTiles only carries render_height on some buildings; fall
-        // back to a plausible low-rise default so untagged buildings still
-        // extrude instead of staying flat.
-        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 6],
-        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
-        "fill-extrusion-opacity": 0.9,
-        // Extrude in gradually from minzoom so buildings don't pop.
-        "fill-extrusion-vertical-gradient": true,
+        "fill-opacity": BUILDING_OPACITY,
       },
       ...slotted("buildings"),
     },
-    // Rubble/debris texture-mapped onto the same extrusion geometry as "building" (matching
-    // height/base so the two coincide exactly), via fill-extrusion-pattern — the only way to
-    // put a pattern on an extruded roof/wall face; a flat fill layer at ground level would
-    // render underneath the extrusion and never be visible at a pitched angle.
-    // "roof-debris-pattern" is registered per-Map-instance at runtime in MapView.vue.
     {
-      id: "building-debris",
-      type: "fill-extrusion",
-      source: "openmaptiles",
-      "source-layer": "building",
-      // Higher than the base "building" layer's minzoom (13) — debris is a close-up detail,
-      // not something that should be visible while still zoomed out over the whole city.
-      minzoom: 14,
-      paint: {
-        "fill-extrusion-pattern": "roof-debris-pattern",
-        "fill-extrusion-height": ["coalesce", ["get", "render_height"], 6],
-        "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
-        "fill-extrusion-opacity": 0.26,
-      },
-      ...slotted("buildings"),
-    },
-  ];
-
-  if (includeLabels) {
-    layers.push({
       id: "place-labels",
       type: "symbol",
       source: "openmaptiles",
@@ -218,10 +219,10 @@ function buildLayers({ includeLabels, pathOpacity }: StyleVariantOptions): Layer
         "text-font": ["Noto Sans Regular"],
         "text-size": 12,
       },
-      paint: { "text-color": "#8a8578", "text-halo-color": "#0b0c0d", "text-halo-width": 1 },
+      paint: { "text-color": "#9a9a9a", "text-halo-color": "#0b0c0d", "text-halo-width": 1 },
       ...slotted("labels"),
-    });
-  }
+    },
+  ];
 
   return layers;
 }
@@ -239,22 +240,6 @@ export function buildMapStyle(tileSourceUrl: string, glyphsUrl: string): StyleSp
     version: 8,
     sources: { openmaptiles: { type: "vector", url: tileSourceUrl } },
     glyphs: glyphsUrl,
-    layers: buildLayers({ includeLabels: true, pathOpacity: MAIN_PATH_OPACITY }),
-  };
-}
-
-/**
- * Variant rendered by a second, decorative MapLibre instance camera-synced to the main
- * map (see MapView.vue) and shown through the screen-space distortion filter. Drops place
- * labels (warped text is unreadable and doubles the ones from the base map) and fades
- * roads out, so the "broken" copy reads as warped terrain/buildings rather than a second
- * legible map.
- */
-export function buildDistortedMapStyle(tileSourceUrl: string, glyphsUrl: string): StyleSpecification {
-  return {
-    version: 8,
-    sources: { openmaptiles: { type: "vector", url: tileSourceUrl } },
-    glyphs: glyphsUrl,
-    layers: buildLayers({ includeLabels: false, pathOpacity: DISTORTED_PATH_OPACITY }),
+    layers: buildLayers(),
   };
 }

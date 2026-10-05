@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { boolean, customType, doublePrecision, index, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
+import { boolean, customType, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 
 /** PostGIS geometry column, SRID 4326 (WGS84 lat/lng). */
 const geometryPoint = customType<{ data: string; driverData: string }>({
@@ -21,13 +21,6 @@ const geometryMultiPolygon = customType<{ data: string; driverData: string }>({
   },
 });
 
-/** A single simple ring — danger zones are always one polygon, never a multipolygon. */
-const geometryPolygon = customType<{ data: string; driverData: string }>({
-  dataType() {
-    return "geometry(Polygon, 4326)";
-  },
-});
-
 /**
  * H3 cell index, resolution fixed by H3_RESOLUTION in shared constants.
  * Computed in application code (h3-js); stored as text since the h3-pg
@@ -45,11 +38,32 @@ export const players = pgTable("players", {
   anonKey: text("anon_key").notNull().unique(),
   position: geometryPoint("position").notNull(),
   currentH3Cell: h3Index("current_h3_cell").notNull(),
-  // The player's chosen start point: their base/shelter. Fixed at creation for
-  // the POC (no relocating a base yet) — distinct from `position`, which moves
-  // as they travel. Plain lat/lng columns since it's display-only for now.
-  baseLat: doublePrecision("base_lat").notNull(),
-  baseLng: doublePrecision("base_lng").notNull(),
+  // The player's base/shelter: the whole INTERACTION_H3_RESOLUTION hex the
+  // chosen start point falls in, not an exact point — basePosition is always
+  // this cell's center. Fixed at creation for the POC (no relocating a base
+  // yet) — distinct from `position`, which moves as they travel.
+  baseH3Cell: h3Index("base_h3_cell").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * A player's base: the hex-of-hexes board previewed in StartPicker, persisted at
+ * creation time (see ARCHITECTURE.md "Base hex grid"). Phase 2 as currently scoped
+ * trusts the client's classification wholesale (`gridData`) rather than re-deriving
+ * it from OSM server-side — the grid is cosmetic/preview-grade by design even in the
+ * client (zoom-simplified vector tiles, stretched to a fixed board shape), so there's
+ * no authoritative ground truth to re-derive it from yet. One base per player for the
+ * POC; multi-base is out of scope (see CLAUDE.md).
+ */
+export const bases = pgTable("bases", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  playerId: uuid("player_id")
+    .notNull()
+    .unique()
+    .references(() => players.id, { onDelete: "cascade" }),
+  hexCell: h3Index("hex_cell").notNull(),
+  radius: integer("radius").notNull(),
+  gridData: jsonb("grid_data").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -102,46 +116,6 @@ export const buildingLookups = pgTable(
   }),
 );
 
-/**
- * A spawned decay/blight zone's shape. Generated once (see
- * dangerZoneGenerator.ts) and persisted rather than recomputed — clients
- * only ever pull the shapes of zones intersecting their current viewport
- * (see findZonesInViewport), never generate them.
- */
-export const dangerZones = pgTable(
-  "danger_zones",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    polygon: geometryPolygon("polygon").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    polygonIdx: index("danger_zones_polygon_idx").using("gist", table.polygon),
-  }),
-);
-
-/**
- * Buildings within a zone's buffer, resolved from Overpass once at zone-
- * creation time (see dangerZoneStore.ts's createDangerZone) rather than on
- * every read — no spatial queries needed against individual outlines here
- * (already scoped to one zone), so a plain jsonb column is enough.
- */
-export const dangerZoneBuildings = pgTable(
-  "danger_zone_buildings",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    zoneId: uuid("zone_id")
-      .notNull()
-      .references(() => dangerZones.id, { onDelete: "cascade" }),
-    outline: jsonb("outline").notNull(),
-    height: doublePrecision("height"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    zoneIdx: index("danger_zone_buildings_zone_idx").on(table.zoneId),
-  }),
-);
-
 /** Cache of Overpass `power=line` ways — see powerInfrastructureCache.ts. */
 export const powerLines = pgTable(
   "power_lines",
@@ -181,6 +155,54 @@ export const powerTowers = pgTable(
  */
 export const powerInfrastructureFetchedTiles = pgTable("power_infrastructure_fetched_tiles", {
   tileKey: text("tile_key").primaryKey(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Cache of AREA_H3_RESOLUTION cells' danger tiers (see dangerProvider.ts),
+ * keyed by H3 cell string. Only non-"safe" cells are ever inserted — the API
+ * always omits safe cells from responses, so an absent cell reads as safe.
+ * `position` (the cell's center, cellToLatLng) exists only so a `disconnect`
+ * action can invalidate/delete the cells it affects (see
+ * dangerProvider.ts's invalidateAreaDangerCacheNear) — nothing queries it by
+ * viewport; that's done by re-deriving the cell id list in app code
+ * (polygonToCells) and looking them up by primary key instead.
+ */
+export const areaDangerTiers = pgTable(
+  "area_danger_tiers",
+  {
+    cell: text("cell").primaryKey(),
+    tier: text("tier").notNull(),
+    position: geometryPoint("position").notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    positionIdx: index("area_danger_tiers_position_idx").using("gist", table.position),
+  }),
+);
+
+/**
+ * Coarse-grid coverage tracker for areaDangerTiers, same pattern/tile size as
+ * powerInfrastructureFetchedTiles — once a tile is marked scored, later
+ * viewport requests covering it are served from areaDangerTiers without
+ * recomputing (see dangerProvider.ts).
+ */
+export const areaDangerFetchedTiles = pgTable("area_danger_fetched_tiles", {
+  tileKey: text("tile_key").primaryKey(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Buildings resolved from Overpass for one AREA_H3_RESOLUTION cell, cached
+ * once and served from here forever after — a row existing (even with an
+ * empty `buildings` array) means "already resolved", distinguishing a
+ * not-yet-queried cell from one queried and found to have no buildings. Only
+ * written for cells the client actually asked about (today: off-limits tier
+ * only — see zones.ts), not eagerly for every scored cell.
+ */
+export const areaDangerCellBuildings = pgTable("area_danger_cell_buildings", {
+  cell: text("cell").primaryKey(),
+  buildings: jsonb("buildings").notNull(),
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

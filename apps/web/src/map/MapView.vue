@@ -1,35 +1,19 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, useTemplateRef } from "vue";
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import {
-  buildDistortedMapStyle,
-  buildMapStyle,
-  DISTORTED_PATH_OPACITY,
-  MAIN_PATH_OPACITY,
-  ROAD_MAJOR_GLOW_OPACITY,
-  ROAD_MINOR_GLOW_OPACITY,
-} from "./style.js";
-import {
-  createCrackedEarthImage,
-  createGroundNoiseImage,
-  createRoofDebrisImage,
-  createWaterRippleImage,
-} from "./noisePattern.js";
+import { buildMapStyle } from "./style.js";
 import { config } from "../config.js";
 import { useMapStore } from "../stores/mapStore.js";
 import { ensurePowerInfrastructureLayer, setPowerInfrastructure } from "./PowerInfrastructureLayer.js";
-import { fetchAllPowerPlants, fetchAllSubstations, fetchPowerInfrastructureInViewport } from "../geo/infrastructure.js";
-import { ensureHexGridLayer, ensureHexHighlightGroup } from "./HexGridLayer.js";
+import { ensureInteractionGridLayer } from "./InteractionGridLayer.js";
+import { fetchPowerInfrastructureInViewport } from "../geo/infrastructure.js";
 
 const mapStore = useMapStore();
 const containerRef = useTemplateRef<HTMLDivElement>("container");
-const distortContainerRef = useTemplateRef<HTMLDivElement>("distortContainer");
 const chromaticOverlayRef = useTemplateRef<HTMLCanvasElement>("chromaticOverlay");
 const weatherOverlayRef = useTemplateRef<HTMLCanvasElement>("weatherOverlay");
 
-let distortMap: maplibregl.Map | null = null;
-let glowFlickerTimeout: ReturnType<typeof setTimeout> | null = null;
 let weatherAnimationFrame: number | null = null;
 let stopWeatherResize: (() => void) | null = null;
 let powerInfraMoveEndHandler: (() => void) | null = null;
@@ -187,17 +171,9 @@ function startWeatherParticles(canvas: HTMLCanvasElement) {
   };
 }
 
-/** Sets both glow layers' opacity to the given fraction of their base value, if loaded. */
-function applyGlowFlicker(targetMap: maplibregl.Map | null, pathOpacity: number, factor: number) {
-  if (!targetMap?.getLayer("road-minor-glow")) return;
-  targetMap.setPaintProperty("road-minor-glow", "line-opacity", ROAD_MINOR_GLOW_OPACITY * pathOpacity * factor);
-  targetMap.setPaintProperty("road-major-glow", "line-opacity", ROAD_MAJOR_GLOW_OPACITY * pathOpacity * factor);
-}
-
 onMounted(() => {
   const el = containerRef.value;
-  const distortEl = distortContainerRef.value;
-  if (!el || !distortEl) return;
+  if (!el) return;
 
   const initialView = {
     center: [config.defaultCenter.lng, config.defaultCenter.lat] as [number, number],
@@ -214,35 +190,18 @@ onMounted(() => {
     // Needed so the rendered frame is still readable by drawImage() below when mirroring it
     // into the chromatic-aberration overlay canvas — otherwise the buffer may already be
     // cleared by the time we read it.
-    preserveDrawingBuffer: true,
+    canvasContextAttributes: { preserveDrawingBuffer: true },
   });
   map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "bottom-right");
-  // Each Map instance has its own image registry, so the "ground-noise-pattern" the style's
-  // background layer references (see style.ts) has to be registered here per-instance.
-  map.on("style.load", () => {
-    map.addImage("ground-noise-pattern", createGroundNoiseImage());
-    map.addImage("water-ripple-pattern", createWaterRippleImage());
-    map.addImage("roof-debris-pattern", createRoofDebrisImage());
-    map.addImage("cracked-earth-pattern", createCrackedEarthImage());
-  });
   // Publish only once the style has finished loading — consumers add
   // sources/layers as soon as they see mapStore.map, and MapLibre throws if
   // that happens before the style is ready.
   map.once("load", () => mapStore.setMap(map));
 
-  // Preview only: what the H3_RESOLUTION grid looks like over the real map. Not wired into
-  // any game mechanic — see HexGridLayer.ts.
-  map.once("load", () => {
-    ensureHexGridLayer(map);
-    // Debug probe: highlight the hex every BC power source falls in (substations in red,
-    // plants in orange — 732 + 120 rows, small enough to fetch and highlight all at once,
-    // no viewport filtering).
-    const substationHighlight = ensureHexHighlightGroup(map, "hex-grid-substations", "#ff3f3f");
-    void fetchAllSubstations().then((substations) => substationHighlight.setPoints(map, substations));
-
-    const plantHighlight = ensureHexHighlightGroup(map, "hex-grid-plants", "#ff9f3f");
-    void fetchAllPowerPlants().then((plants) => plantHighlight.setPoints(map, plants));
-  });
+  // Always-on, faint outline of the INTERACTION_H3_RESOLUTION grid bases/destinations
+  // actually snap to — not just drawn where a danger tier or destination highlight happens
+  // to render it (see TravelPanel.vue, AreaDangerLayer.ts).
+  map.once("load", () => ensureInteractionGridLayer(map));
 
   // Major transmission power lines/towers, pulled from Overpass for whatever's currently in
   // view — visualization only, no persistence, so a live "moveend" re-query (same debounce
@@ -279,9 +238,7 @@ onMounted(() => {
     void loadPowerInfrastructure();
   });
 
-  // Chromatic-aberration overlay: a live mirror of the primary map canvas (unlike the
-  // distorted map, this needs identical content, just different post-processing, so a
-  // pixel copy is the right tool here rather than a second MapLibre instance). The
+  // Chromatic-aberration overlay: a live pixel-copy mirror of the primary map canvas. The
   // "chromatic-aberration" filter is applied via CSS, and a radial CSS mask fades it out
   // toward the center so the fringing only shows near the viewport edges, like a lens
   // artifact, while the crisp base map shows through unaltered in the middle.
@@ -289,7 +246,7 @@ onMounted(() => {
   const chromaticCtx = chromaticOverlay?.getContext("2d") ?? null;
 
   function resizeChromaticOverlay() {
-    if (!chromaticOverlay) return;
+    if (!chromaticOverlay || !el) return;
     const dpr = window.devicePixelRatio || 1;
     chromaticOverlay.width = el.clientWidth * dpr;
     chromaticOverlay.height = el.clientHeight * dpr;
@@ -305,119 +262,48 @@ onMounted(() => {
     chromaticCtx.drawImage(map.getCanvas(), 0, 0, chromaticOverlay.width, chromaticOverlay.height);
   });
 
-  // Second, non-interactive MapLibre instance rendering a reduced style (no labels, faded
-  // roads — see buildDistortedMapStyle), camera-synced to the primary map and shown through
-  // the CSS distortion filter (applied to its container below). This has to be a real
-  // second render rather than a screen-space copy of the primary canvas, since it needs to
-  // show different content (no labels/paths), not just a warped copy of the same pixels.
-  // Trade-off: doubles vector-tile fetches and GPU/memory cost versus a pixel-copy overlay.
-  distortMap = new maplibregl.Map({
-    container: distortEl,
-    style: buildDistortedMapStyle(config.tileSourceUrl, config.glyphsUrl),
-    ...initialView,
-    maxPitch: 70,
-    attributionControl: false,
-    interactive: false,
-  });
-  distortMap.on("style.load", () => {
-    distortMap?.addImage("ground-noise-pattern", createGroundNoiseImage());
-    distortMap?.addImage("water-ripple-pattern", createWaterRippleImage());
-    distortMap?.addImage("roof-debris-pattern", createRoofDebrisImage());
-    distortMap?.addImage("cracked-earth-pattern", createCrackedEarthImage());
-  });
-  map.on("move", () => {
-    distortMap?.jumpTo({
-      center: map.getCenter(),
-      zoom: map.getZoom(),
-      bearing: map.getBearing(),
-      pitch: map.getPitch(),
-    });
-  });
-
-  // Irregular flicker on the path glow (like a failing light), applied in sync to both maps
-  // so it reads as one in-world light source rather than two independent effects.
-  const scheduleGlowFlicker = () => {
-    glowFlickerTimeout = setTimeout(
-      () => {
-        const factor = 0.7 + Math.random() * 0.3;
-        applyGlowFlicker(map, MAIN_PATH_OPACITY, factor);
-        applyGlowFlicker(distortMap, DISTORTED_PATH_OPACITY, factor);
-        scheduleGlowFlicker();
-      },
-      2000 + Math.random() * 4000,
-    );
-  };
-  scheduleGlowFlicker();
-
   const weatherOverlay = weatherOverlayRef.value;
   if (weatherOverlay) stopWeatherResize = startWeatherParticles(weatherOverlay) ?? null;
 });
 
 onUnmounted(() => {
-  if (glowFlickerTimeout !== null) clearTimeout(glowFlickerTimeout);
   if (weatherAnimationFrame !== null) cancelAnimationFrame(weatherAnimationFrame);
   stopWeatherResize?.();
   if (powerInfraMoveEndHandler && mapStore.map) mapStore.map.off("moveend", powerInfraMoveEndHandler);
   mapStore.map?.remove();
   mapStore.setMap(null);
-  distortMap?.remove();
-  distortMap = null;
 });
 </script>
 
 <template>
   <svg class="distortion-defs" aria-hidden="true" focusable="false">
-    <filter
-      id="map-distortion"
-      x="-20%"
-      y="-20%"
-      width="140%"
-      height="140%"
-      color-interpolation-filters="sRGB"
-    >
-      <!-- baseFrequency needs to be high enough that noise varies within a short distance, or edges just
-           shift uniformly instead of bending. type="turbulence" (vs fractalNoise) gives a more angular,
-           chaotic field to start from. -->
-      <feTurbulence type="turbulence" baseFrequency="0.015 0.02" numOctaves="4" seed="7" result="warpNoiseRaw" />
-      <!-- Quantize into discrete steps so the displacement jumps between levels instead of flowing
-           smoothly — that's what reads as jagged/cracked rather than wavy. -->
-      <feComponentTransfer in="warpNoiseRaw" result="warpNoise">
-        <feFuncR type="discrete" tableValues="0 0.25 0.5 0.75 1" />
-        <feFuncG type="discrete" tableValues="0 0.25 0.5 0.75 1" />
-      </feComponentTransfer>
-      <!-- scale is the max pixel displacement. -->
-      <feDisplacementMap in="SourceGraphic" in2="warpNoise" scale="10" xChannelSelector="R" yChannelSelector="G" />
-    </filter>
-    <!-- Isolates each color channel, offsets red/blue in opposite directions, and recombines
-         via screen blending — the classic lens chromatic-aberration look. Where a CSS mask
-         (see .chromatic-overlay) hides the effect, none of this matters. -->
+    <!-- Isolates a red tint and a black tint, offsets them in opposite directions, and
+         recombines — the red copy screens in (so it actually brightens into a visible red
+         fringe rather than getting crushed by multiply against the near-black base map),
+         while the black copy multiplies in (so it darkens that side toward black). A
+         darker, bruised fringe instead of the classic additive red/green/blue
+         lens-aberration look. Where a CSS mask (see .chromatic-overlay) hides the effect,
+         none of this matters. -->
     <filter id="chromatic-aberration" color-interpolation-filters="sRGB">
       <feColorMatrix
         in="SourceGraphic"
         type="matrix"
-        values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
-        result="red"
+        values="0.55 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0"
+        result="darkRed"
       />
-      <feOffset in="red" dx="6" dy="0" result="redOffset" />
+      <feOffset in="darkRed" dx="6" dy="0" result="darkRedOffset" />
       <feColorMatrix
         in="SourceGraphic"
         type="matrix"
-        values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0"
-        result="green"
+        values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.35 0"
+        result="black"
       />
-      <feColorMatrix
-        in="SourceGraphic"
-        type="matrix"
-        values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0"
-        result="blue"
-      />
-      <feOffset in="blue" dx="-6" dy="0" result="blueOffset" />
-      <feBlend in="redOffset" in2="green" mode="screen" result="redGreen" />
-      <feBlend in="redGreen" in2="blueOffset" mode="screen" />
+      <feOffset in="black" dx="-6" dy="0" result="blackOffset" />
+      <feBlend in="darkRedOffset" in2="SourceGraphic" mode="screen" result="withDarkRed" />
+      <feBlend in="withDarkRed" in2="blackOffset" mode="multiply" />
     </filter>
   </svg>
   <div ref="container" class="map-container"></div>
-  <div ref="distortContainer" class="distort-container" aria-hidden="true"></div>
   <canvas ref="chromaticOverlay" class="chromatic-overlay" aria-hidden="true"></canvas>
   <div class="ambience-tint" aria-hidden="true"></div>
   <div class="ambience-vignette" aria-hidden="true"></div>
@@ -438,20 +324,6 @@ onUnmounted(() => {
   inset: 0;
   background: #0b0c0d;
   filter: saturate(0.75) contrast(1.05);
-}
-
-/* Second map (no labels, faded roads — see style.ts), warped by the distortion filter and
-   blended back over the clean map. mix-blend-mode/opacity control how strongly the
-   "glitched double" reads through — screen+~0.5 gives a ghosted overlap; try "difference"
-   for a harsher, more corrupted-signal look. */
-.distort-container {
-  position: fixed;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  filter: url(#map-distortion) saturate(0.75) contrast(1.05);
-  opacity: 0.5;
-  mix-blend-mode: screen;
 }
 
 /* Sickly color cast. Swap --tint-color to rgba(90, 60, 120, 0.16) for a

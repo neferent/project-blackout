@@ -5,10 +5,9 @@ import { registerMapLayer } from "../../map/layerRegistry.js";
 const SOURCE_ID = "decay-building-highlight";
 const LAYER_ID = "decay-building-highlight-fill";
 
-// Same hue as DecayZoneLayer's slab, so a tinted building reads as "part of
-// the same zone" rather than a separately-caused effect.
-const DECAY_COLOR = "#7a3fa0";
-const DEFAULT_HEIGHT = 6;
+// Matches AreaDangerLayer's off-limits tier color, so a tinted building reads as "part of
+// the same danger zone" rather than a separately-caused effect.
+const DECAY_COLOR = "#c93f3f";
 
 export function ensureDecayBuildingHighlightLayer(map: MapLibreMap): void {
   if (map.getSource(SOURCE_ID)) return;
@@ -17,13 +16,11 @@ export function ensureDecayBuildingHighlightLayer(map: MapLibreMap): void {
 
   registerMapLayer(map, "overlay-over-buildings", {
     id: LAYER_ID,
-    type: "fill-extrusion",
+    type: "fill",
     source: SOURCE_ID,
     paint: {
-      "fill-extrusion-color": DECAY_COLOR,
-      "fill-extrusion-opacity": 0.5,
-      "fill-extrusion-height": ["get", "height"],
-      "fill-extrusion-base": 0,
+      "fill-color": DECAY_COLOR,
+      "fill-opacity": 0.5,
     },
   });
 }
@@ -45,7 +42,7 @@ export function setDecayBuildingHighlights(map: MapLibreMap, buildings: Building
     features: buildings.map((building) => ({
       type: "Feature",
       geometry: { type: "Polygon", coordinates: [building.outline.map((p) => [p.lng, p.lat])] },
-      properties: { height: (building.height ?? DEFAULT_HEIGHT) + 0.4 },
+      properties: {},
     })),
   });
 }

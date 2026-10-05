@@ -1,4 +1,4 @@
-import maplibregl from "maplibre-gl";
+import * as maplibregl from "maplibre-gl";
 import type { CustomLayerInterface, GeoJSONSource, Map as MapLibreMap } from "maplibre-gl";
 import type { LatLng, PowerInfrastructureInViewportResponse } from "@blackout/shared";
 import { registerMapLayer } from "./layerRegistry.js";
@@ -7,7 +7,7 @@ const TOWER_SOURCE_ID = "power-towers";
 const LINE_LAYER_ID = "power-lines-line";
 const TOWER_LAYER_ID = "power-towers-point";
 
-/** How high above ground the wire floats — plausible against nearby building extrusion heights (style.ts). */
+/** How high above ground the wire floats, for a plausible overhead-line look at the current pitch. */
 const WIRE_HEIGHT_METERS = 25;
 const WIRE_COLOR: [number, number, number, number] = [0.788, 0.647, 0.231, 0.9]; // #c9a53b
 
@@ -106,13 +106,13 @@ function createPowerLineLayer(id: string): PowerLineLayer {
         pendingLines = null;
       }
     },
-    render(glc, matrix) {
+    render(glc, options) {
       if (!program || !buffer || vertexCount === 0) return;
       glc.useProgram(program);
       glc.enableVertexAttribArray(aPos);
       glc.bindBuffer(glc.ARRAY_BUFFER, buffer);
       glc.vertexAttribPointer(aPos, 3, glc.FLOAT, false, 0, 0);
-      glc.uniformMatrix4fv(uMatrix, false, matrix);
+      glc.uniformMatrix4fv(uMatrix, false, options.modelViewProjectionMatrix);
       glc.uniform4fv(uColor, WIRE_COLOR);
       glc.drawArrays(glc.LINES, 0, vertexCount);
       // MapLibre reuses this GL context for every other layer in the same frame and doesn't

@@ -1,30 +1,26 @@
 import { Hono } from "hono";
-import {
-  buildingsInZoneResponseSchema,
-  createDangerZoneRequestSchema,
-  createDangerZoneResponseSchema,
-  zonesInViewportRequestSchema,
-  zonesInViewportResponseSchema,
-} from "@blackout/shared";
-import { createDangerZone, findZoneBuildings, findZonesInViewport } from "../services/dangerZoneStore.js";
+import { buildingsInCellRequestSchema, buildingsInZoneResponseSchema, zonesInViewportRequestSchema, zonesInViewportResponseSchema } from "@blackout/shared";
+import { dangerProvider } from "../services/dangerProvider.js";
+import { findOrFetchBuildingsInCell } from "../services/areaDangerBuildingsCache.js";
 
 export const zonesRoute = new Hono();
 
-/** Manual/dev spawn trigger for the POC — no automated spawner yet. */
-zonesRoute.post("/", async (c) => {
-  const body = createDangerZoneRequestSchema.parse(await c.req.json());
-  const zone = await createDangerZone(body.center, body.bufferMeters);
-  return c.json(createDangerZoneResponseSchema.parse(zone), 201);
-});
-
-/** Shapes only (not building data) for every zone intersecting the given viewport. */
+/** Every non-safe-tier AREA_H3_RESOLUTION cell intersecting the given viewport. */
 zonesRoute.post("/in-viewport", async (c) => {
   const body = zonesInViewportRequestSchema.parse(await c.req.json());
-  const zones = await findZonesInViewport(body);
-  return c.json(zonesInViewportResponseSchema.parse(zones));
+  const cells = await dangerProvider.tiersInViewport(body);
+  return c.json(zonesInViewportResponseSchema.parse(cells));
 });
 
-zonesRoute.get("/:id/buildings", async (c) => {
-  const buildings = await findZoneBuildings(c.req.param("id"));
+/**
+ * Buildings within one AREA_H3_RESOLUTION cell — served from the DB cache
+ * after the first resolve (see areaDangerBuildingsCache.ts), never a live
+ * Overpass call on a cache hit. Callers should only query cells they intend
+ * to show building highlights for (e.g. off-limits tier) — not every cell in
+ * a viewport, to stay within Overpass's self-throttle on a cold cell.
+ */
+zonesRoute.post("/buildings-in-cell", async (c) => {
+  const body = buildingsInCellRequestSchema.parse(await c.req.json());
+  const buildings = await findOrFetchBuildingsInCell(body.cell);
   return c.json(buildingsInZoneResponseSchema.parse(buildings));
 });

@@ -14,3 +14,8 @@ export function getAnonPlayerKey(): string {
   }
   return key;
 }
+
+/** Forgets the stored id — the next getAnonPlayerKey() call mints a fresh one. */
+export function clearAnonPlayerKey(): void {
+  localStorage.removeItem(STORAGE_KEY);
+}

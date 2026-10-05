@@ -80,6 +80,57 @@ place labels), and `player` (a dynamically added circle layer, `apps/web/src/fea
 travel/PlayerMarkerLayer.ts`). Scavenging/building-classification work adds layers into
 `overlay-under-buildings`/`overlay-over-buildings`/`markers` the same way.
 
+## Base hex grid
+
+`apps/web/src/features/placement/hexGrid.ts` turns a player's chosen H3 interaction cell
+into a fixed-size **hex-of-hexes board** — a flat-top hexagon made of `BASE_HEX_RADIUS`
+rings of smaller hex cells (127 cells at radius 6), in axial coordinates. This is the
+foundation for base building: eventually players place crafting stations/garden plots
+into these cells, and adjacent cells bonus each other (e.g. anvil next to forge = faster
+crafts). Hex cells were chosen specifically for that — every cell has exactly 6
+equidistant neighbors, so "adjacent" never needs the orthogonal-vs-diagonal distinction a
+square grid would force.
+
+Key design point: **every base is the same board, regardless of the real hex's shape.**
+Real H3 cells vary in size/shape (more at some latitudes than others), but gameplay
+(capacity, costs, UI) shouldn't wobble per player based on where they happened to click.
+So `classifyHexGrid` computes the abstract hex-of-hexes layout once (at unit size), finds
+its bounding box, then linearly maps that onto the real hex's actual bounding box in
+meters — independently per axis. The real OSM features (building/water/road/landcover,
+read live via MapLibre's `queryRenderedFeatures`) get stretched or squeezed to exactly
+fill the fixed board. This is a deliberate trade: distort the ground truth, not the board
+shape or cell count.
+
+`classifyHexGrid` reads from already-rendered vector tiles, which are zoom-simplified —
+fine for showing the player what their base will roughly look like while picking a hex
+(`StartPicker.vue`), not full-fidelity ground truth. That preview-grade quality is a
+property of the *data source* (simplified tiles), not of client vs. server execution, so
+Phase 2 made a deliberate call: rather than standing up a parallel server-side Overpass
+pipeline (the `findBuildingsInZone` pattern used for decay buildings) to re-derive the
+same approximate answer, the server trusts the client's computed `HexGridResult` outright
+and persists it on create-player (`POST /players`, `hexGridResultSchema` in
+`packages/shared/src/schemas.ts`). The one thing the server does re-check is the
+minimum-building-cells rule (`MIN_BASE_BUILDING_CELLS`), since that's a cheap, meaningful
+guard against a tampered or buggy client — never trust a client claim where checking it
+server-side is nearly free, even if the underlying data isn't authoritative either way.
+
+Persisted shape (simpler than originally proposed — no `base_hexes`, no multi-hex/
+multi-base support, since neither is designed yet):
+
+```
+bases (id, player_id unique, hex_cell, radius, grid_data jsonb, created_at)
+```
+
+One base per player for the POC (`player_id` is unique) — `playerState.ts` joins it in as
+`baseGrid` on every `resolvePlayerState` call; players created before this existed simply
+have `baseGrid: null`. A base can eventually own multiple hexes (expansion), and a player
+can eventually own multiple bases — the 2nd/3rd base or additional hex has a steep cost,
+not yet designed; that's when `base_hexes` would actually earn its keep. If the preview
+grid ever proves too distorted to be fair gameplay ground truth, authoritative OSM
+re-derivation is the fallback plan, not a given. Phase 3 (not built) is actual placement:
+persisting what's in each cell, and the adjacency-bonus system itself (time-cost
+modifiers between touching item pairs).
+
 ## Identity
 
 `apps/api/src/identity/anonPlayer.ts` (server) and `apps/web/src/identity/anonPlayerId.ts`

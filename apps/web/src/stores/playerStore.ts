@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { playerStateSchema, type PlayerState } from "@blackout/shared";
+import { playerStateSchema, type HexGridResult, type PlayerState } from "@blackout/shared";
 import { apiClient } from "../api/client.js";
+import { clearAnonPlayerKey } from "../identity/anonPlayerId.js";
 
 export const usePlayerStore = defineStore("player", () => {
   const state = ref<PlayerState | null>(null);
@@ -20,10 +21,19 @@ export const usePlayerStore = defineStore("player", () => {
     return state.value;
   }
 
-  async function create(position: { lat: number; lng: number }): Promise<PlayerState> {
-    state.value = playerStateSchema.parse(await apiClient.post("/players", { position }));
+  async function create(position: { lat: number; lng: number }, grid: HexGridResult): Promise<PlayerState> {
+    state.value = playerStateSchema.parse(await apiClient.post("/players", { position, grid }));
     return state.value;
   }
 
-  return { state, loaded, refresh, create };
+  // POC-only testing helper: wipes the current anonymous player server-side (cascades
+  // to their actions/base) and forgets the anon key, so the next request mints a fresh
+  // one and StartPicker starts over. See anonPlayerId.ts for the identity scheme.
+  async function reset(): Promise<void> {
+    await apiClient.delete("/players/me").catch(() => {});
+    clearAnonPlayerKey();
+    state.value = null;
+  }
+
+  return { state, loaded, refresh, create, reset };
 });

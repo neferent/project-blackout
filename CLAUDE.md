@@ -52,18 +52,18 @@ must-not-violate rules.
   garden center, ...) near the main building — verified against live Walmart OSM data.
   Nominatim reverse (`apps/web/src/geo/nominatim.ts`, `describePlace`) is kept only as a
   fallback for points Overpass finds no polygon for. Neither reads vector-tile data —
-  OpenFreeMap's OpenMapTiles `building` layer is geometry-only (for 3D extrusion) and
-  carries no `shop=*`/`amenity=*` tags. Both external calls are self-throttled
+  OpenFreeMap's OpenMapTiles `building` layer is geometry-only (footprints, flat-rendered —
+  see "2D map" below) and carries no `shop=*`/`amenity=*` tags. Both external calls are self-throttled
   client-side (Nominatim 1 req/sec per its usage policy; Overpass 1 req/1.5s as a
   good-citizen limit on the free public instance).
+- **2D map.** `apps/web/src/map/style.ts` renders buildings as a flat `fill` layer, not
+  `fill-extrusion` — the game intentionally dropped 3D extrusions and the old "light
+  pillar" highlight style (stacked-extrusion glow) in favor of a stylized flat look.
+  Don't reintroduce `fill-extrusion` for buildings/highlights without being asked.
 
 ## Out of scope (don't build unless asked)
 
 Scavenging, inventory, crafting, shelters/devices, real encounters, NPCs, multiplayer,
-deployment.
-
-The power-grid danger mechanic (per-building `connectedToGrid` state, the `disconnect`
-action, and `DangerProvider` proximity to substations/plants) is now in scope — it's
-partially built, see `apps/api/src/services/dangerProvider.ts` and
-`apps/api/src/actions/disconnect.ts`. Rendering it (Phase 3: map layers, a disconnect
-control in the building-lookup UI) is not done yet.
+deployment. The power-grid danger mechanic and base placement/hex grid are in scope and
+partially built — see ARCHITECTURE.md ("Base hex grid") and memory for current phase
+status before picking up work there.
