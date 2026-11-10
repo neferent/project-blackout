@@ -52,6 +52,29 @@ multiplayer interaction, user accounts (identity is anonymous for now), and depl
 - [`docs/base-layout.md`](docs/base-layout.md): format of the base-layout rule config
 - [`CLAUDE.md`](CLAUDE.md): project rules and conventions
 
+## Data and attribution
+
+Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright),
+available under the [Open Database License (ODbL)](https://opendatacommons.org/licenses/odbl/).
+This repository contains no OSM data. Extracts, routing tiles and imported tables are
+generated locally and kept out of version control.
+
+- **Map tiles:** [OpenFreeMap](https://openfreemap.org/) (OpenMapTiles schema, built from
+  OSM data), rendered with [MapLibre GL JS](https://maplibre.org/)
+- **Place lookup:** [Nominatim](https://nominatim.org/), used under the
+  [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/)
+- **Building and infrastructure queries:** [Overpass API](https://overpass-api.de/)
+- **Pedestrian routing:** [Valhalla](https://github.com/valhalla/valhalla), self-hosted
+  and built from [Geofabrik](https://download.geofabrik.de/) OSM extracts
+- **Power-grid import:** [osm2pgsql](https://osm2pgsql.org/), run in a container
+
+Any database derived from OSM data (for example the imported power-grid and road tables)
+remains subject to the ODbL if it is shared publicly.
+
+## License
+
+Proprietary. All rights reserved. See [`LICENSE`](LICENSE).
+
 ## Stack
 
 - `apps/web` — Vue 3 + TypeScript + Vite SPA (Pinia, TanStack Query, MapLibre GL JS)
