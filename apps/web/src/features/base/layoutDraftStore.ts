@@ -1,15 +1,19 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import {
+  applyDesignations,
+  designationsOf,
   evaluateLayout,
   placeItem,
   planLayoutCommit,
   removePlacement,
-  rotatePlacement,
   SEED_BASE_LAYOUT_CONFIG,
+  setTileDesignation,
   validateLayout,
   validDropTiles,
+  type Designation,
   type LayoutPlacement,
+  type TileDesignation,
 } from "@blackout/shared";
 import { apiClient } from "../../api/client.js";
 import { useBaseStore } from "./baseStore.js";
@@ -41,7 +45,11 @@ export const useLayoutDraftStore = defineStore("layoutDraft", () => {
   /** Last rejected edit, shown briefly in the panel. */
   const message = ref<string | null>(null);
 
-  const tiles = computed(() => baseStore.state?.tiles ?? []);
+  /** Draft designations (sparse); the committed ones live on the base state's tiles. */
+  const designations = ref<TileDesignation[]>([]);
+  const committedTiles = computed(() => baseStore.state?.tiles ?? []);
+  /** Tiles as the draft sees them: committed types with the draft designations laid over. */
+  const tiles = computed(() => applyDesignations(committedTiles.value, designations.value));
   const items = computed(() => baseStore.state?.items ?? {});
   const committed = computed(() => baseStore.state?.placements ?? []);
 
@@ -57,16 +65,20 @@ export const useLayoutDraftStore = defineStore("layoutDraft", () => {
     const key = (p: LayoutPlacement) => `${p.itemId}:${p.q}:${p.r}:${p.facing}`;
     const a = placements.value.map(key).sort().join("|");
     const b = committed.value.map(key).sort().join("|");
-    return a !== b;
+    const dKey = (d: TileDesignation) => `${d.q}:${d.r}:${d.designation}`;
+    const da = designations.value.map(dKey).sort().join("|");
+    const db = designationsOf(committedTiles.value).map(dKey).sort().join("|");
+    return a !== b || da !== db;
   });
 
   /** What committing would do and cost right now (the server recomputes this itself). */
   const plan = computed(() =>
     planLayoutCommit(config, {
-      tiles: tiles.value,
+      tiles: committedTiles.value,
       items: items.value,
       current: committed.value,
       requested: placements.value,
+      requestedDesignations: designations.value,
     }),
   );
   const costHours = computed(() => (plan.value.ok ? plan.value.cost.hours : 0));
@@ -81,6 +93,7 @@ export const useLayoutDraftStore = defineStore("layoutDraft", () => {
       await apiClient.post("/base/layout/commit", {
         baseVersion: baseStore.state?.layoutVersion ?? 0,
         placements: placements.value,
+        designations: designations.value,
       });
       // Reloading picks up the running action, which locks the panel.
       await baseStore.load();
@@ -98,7 +111,27 @@ export const useLayoutDraftStore = defineStore("layoutDraft", () => {
   /** Reset the draft to the committed layout (also the Discard action). */
   function resetToCommitted() {
     placements.value = committed.value.map((p) => ({ ...p }));
+    designations.value = designationsOf(committedTiles.value);
     message.value = null;
+  }
+
+  /** Paint a tile as walkway/clear, or pass null to erase. Free in plan mode. */
+  function paint(at: { q: number; r: number }, designation: Designation | null): boolean {
+    const here = tiles.value.find((t) => t.q === at.q && t.r === at.r);
+    if (here && (here.designation ?? null) === designation) return true;
+    const result = setTileDesignation(
+      config,
+      { tiles: tiles.value, placements: placements.value, designations: designations.value },
+      at,
+      designation,
+    );
+    if (!result.ok) {
+      message.value = result.message;
+      return false;
+    }
+    designations.value = result.designations;
+    message.value = null;
+    return true;
   }
 
   function place(itemId: string, at: { q: number; r: number }): boolean {
@@ -110,10 +143,6 @@ export const useLayoutDraftStore = defineStore("layoutDraft", () => {
     placements.value = result.placements;
     message.value = null;
     return true;
-  }
-
-  function rotate(itemId: string) {
-    placements.value = rotatePlacement(placements.value, itemId);
   }
 
   function remove(itemId: string) {
@@ -141,7 +170,8 @@ export const useLayoutDraftStore = defineStore("layoutDraft", () => {
     dirty,
     resetToCommitted,
     place,
-    rotate,
+    paint,
+    designations,
     remove,
     dropTargets,
   };

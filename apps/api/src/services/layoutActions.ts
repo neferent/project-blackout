@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { layoutActionDataSchema, type LayoutActionData } from "@blackout/shared";
 import { db } from "../db/client.js";
-import { actions, bases, items, placements } from "../db/schema.js";
+import { actions, baseTiles, bases, items, placements } from "../db/schema.js";
 import { placementKind } from "./baseLayoutConfig.js";
 
 export interface LayoutActionRow {
@@ -45,6 +45,16 @@ export async function finalizeLayoutIfDone(playerId: string): Promise<void> {
       .where(and(eq(bases.id, data.baseId), eq(bases.layoutVersion, data.baseVersion)))
       .returning({ id: bases.id });
     if (bumped.length === 0) return; // already applied
+
+    if (data.designations) {
+      await tx.update(baseTiles).set({ designation: null }).where(eq(baseTiles.baseId, data.baseId));
+      for (const d of data.designations) {
+        await tx
+          .update(baseTiles)
+          .set({ designation: d.designation })
+          .where(and(eq(baseTiles.baseId, data.baseId), eq(baseTiles.q, d.q), eq(baseTiles.r, d.r)));
+      }
+    }
 
     await tx.delete(placements).where(eq(placements.baseId, data.baseId));
     if (data.placements.length) {

@@ -13,8 +13,6 @@ the client for the free live preview, the server to validate and price a commit.
 
 - Neighbors are indexed by facing 0–5. Facing 0 = +q, increasing clockwise on screen.
 - Distances are hex distance (`hexDistance`).
-- "Sides" of a station are relative to its facing: side `s` of a station facing `f` is
-  absolute direction `(s + f) % 6`.
 
 ## Tile types
 
@@ -25,6 +23,22 @@ Derived once at base creation from the client's board classification
 conversion. Items list the tile types they accept in `slots`; roads and water are simply
 never listed, so nothing can be placed on them.
 
+## Tile designations
+
+Players can paint a tile `walkway` or `clear` (`base_tiles.designation`, null = plain).
+Both keep items off the tile (`designated-tile` error, `placeItem`/`validDropTiles` refuse
+it). Allowed only on `designations.allowedTiles` (never water/road; `bad-designation`).
+Indoors, `designations.walkwayRequiredIndoors` makes a non-walkway indoor tile
+impassable in the door reachability BFS (the door tile is the start), so stations need a
+painted walkway path from the door to any tile next to them. Outdoor tiles never need one.
+Designations travel with the layout: `POST /base/layout/commit` takes an optional full
+`designations` list (omitted = unchanged), prices each changed tile at `designations.setHours`
+in `planLayoutCommit`, and `finalizeLayoutIfDone` applies them with the placements.
+
+```ts
+designations: { allowedTiles: ["indoor","paved","yard","garden"], setHours: 0.05, walkwayRequiredIndoors: true }
+```
+
 ## Top-level config
 
 | Field | Default | Meaning |
@@ -33,7 +47,7 @@ never listed, so nothing can be placed on them.
 | `bonusCap` | 0.25 | Cap on a station's summed *positive* bonus (0.25 = at most −25% time) |
 | `maxPenalty` | 0.5 | Floor on a station's net bonus |
 | `quality` | `{min: .5, max: 1.5}` | Quality 0–100 maps linearly onto a multiplier on positive bonuses |
-| `unreachablePenalty` | 0.1 | Penalty when a station's front tile isn't reachable from the door |
+| `unreachablePenalty` | 0.1 | Penalty when no tile next to a station is reachable from the door |
 | `rotateHours` | 0.1 | Game hours for rotating a placed item |
 | `moveHoursPerUnit` | 0.05 | `k` in the move-cost formula |
 | `items`, `synergies`, `hazards` | – | See below |
@@ -50,7 +64,6 @@ never listed, so nothing can be placed on them.
   moveBaseHours: 0.5,                   // flat part of the move cost
   capabilities: ["heat", "smelting"],   // station: own capabilities
   grants: ["clamping"],                 // attachment: given to an adjacent station
-  sides: [3],                           // attachment: allowed station-relative sides (omit = any)
   daylightBonus: 0.04,                  // bonus on an indoor tile bordering a non-indoor tile/edge
 }
 ```
@@ -59,13 +72,13 @@ Items are *definitions*. Each player-owned item is an instance (`items` table: o
 `definition_id`, `quality` 0–100) so quality differs and items can be traded.
 
 Placement rules (`validateLayout`): the tile exists and its type is in `slots`; one item per
-tile; an item is placed at most once; facing is 0–5; stations need an in-board, non-water,
-unoccupied tile at their front; at most one door.
+tile; an item is placed at most once; facing is 0–5 but vestigial (the UI has no rotation; items
+link by adjacency only); at most one door.
 
 ## Capabilities
 
 `resolveCapabilities` returns, for a station: its own capabilities, those granted by
-adjacent attachments (respecting `sides`; one attachment can serve two stations), and those
+adjacent attachments (any side — adjacency alone links them; one attachment can serve two stations, and each link is drawn as a line), and those
 of every other station with the hex distance. A recipe requirement
 `{ capability, range? }` is met (`requirementMet`) by self, an attached attachment, or —
 only when `range` is given — a nearby station within that range.
@@ -103,7 +116,7 @@ Per station: `positive` = sum of positive entries (synergy, daylight) → capped
 `bonusCap`; `penalty` = sum of negative entries (hazard, too-far, unreachable);
 `bonus = max(−maxPenalty, cappedPositive − penalty)`; `timeMultiplier = 1 − bonus`.
 Reachability: a BFS from the door tile over free non-water tiles; a station is reachable if
-its front tile is in that set. With no door, every station is penalized and a warning shown.
+any neighbor tile is in that set. With no door, every station is penalized and a warning shown.
 `evaluateLayout` also returns the links drawn on the board and the warnings list.
 
 ## Cost of a layout change

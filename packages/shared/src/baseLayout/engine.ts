@@ -1,16 +1,29 @@
-import type { BaseLayoutConfig, ItemDef, TileType } from "./config.js";
+import type { BaseLayoutConfig, Designation, ItemDef, TileType } from "./config.js";
 import {
-  directionBetween,
   hexDistance,
   hexKey,
-  hexNeighbor,
   hexNeighbors,
-  normalizeFacing,
   type Axial,
 } from "./hex.js";
 
 export interface LayoutTile extends Axial {
   tileType: TileType;
+  /** Player-set designation; absent/null = plain tile. */
+  designation?: Designation | null;
+}
+/** Sparse form used on the wire and in actions: only designated tiles are listed. */
+export interface TileDesignation extends Axial {
+  designation: Designation;
+}
+
+/** Tiles with `designations` laid over them (tiles not listed end up undesignated). */
+export function applyDesignations(tiles: LayoutTile[], designations: TileDesignation[]): LayoutTile[] {
+  const byKey = new Map(designations.map((d) => [hexKey(d.q, d.r), d.designation]));
+  return tiles.map((t) => ({ ...t, designation: byKey.get(hexKey(t.q, t.r)) ?? null }));
+}
+
+export function designationsOf(tiles: LayoutTile[]): TileDesignation[] {
+  return tiles.flatMap((t) => (t.designation ? [{ q: t.q, r: t.r, designation: t.designation }] : []));
 }
 export interface LayoutPlacement extends Axial {
   itemId: string;
@@ -99,8 +112,9 @@ export type LayoutErrorCode =
   | "tile-occupied"
   | "duplicate-item"
   | "bad-facing"
-  | "front-blocked"
-  | "multiple-doors";
+  | "multiple-doors"
+  | "designated-tile"
+  | "bad-designation";
 
 export interface LayoutError {
   code: LayoutErrorCode;
@@ -150,19 +164,25 @@ export function validateLayout(config: BaseLayoutConfig, input: LayoutInput): La
         message: `${def.name} can't go on a ${tile.tileType} tile`,
       });
     }
+    if (tile.designation) {
+      errors.push({
+        code: "designated-tile",
+        itemId: placement.itemId,
+        message: `${def.name} is on a ${tile.designation} tile — items can't go there`,
+      });
+    }
 
     if (def.kind === "door") doors++;
-
-    if (def.kind === "station") {
-      const front = hexNeighbor(placement, placement.facing);
-      const frontKey = hexKey(front.q, front.r);
-      const frontTile = ctx.tileByKey.get(frontKey);
-      if (!frontTile || frontTile.tileType === "water" || input.placements.some((p) => hexKey(p.q, p.r) === frontKey)) {
-        errors.push({ code: "front-blocked", itemId: placement.itemId, message: `${def.name} needs an open tile in front` });
-      }
-    }
   }
   if (doors > 1) errors.push({ code: "multiple-doors", message: "A base can only have one door" });
+  for (const tile of input.tiles) {
+    if (tile.designation && !config.designations.allowedTiles.includes(tile.tileType)) {
+      errors.push({
+        code: "bad-designation",
+        message: `A ${tile.tileType} tile can't be a ${tile.designation} (${hexKey(tile.q, tile.r)})`,
+      });
+    }
+  }
   return errors;
 }
 
@@ -202,10 +222,6 @@ export function resolveCapabilities(config: BaseLayoutConfig, input: LayoutInput
     const distance = hexDistance(station.placement, other.placement);
     if (other.def.kind === "attachment") {
       if (distance !== 1) continue;
-      const side = directionBetween(station.placement, other.placement);
-      if (side === null) continue;
-      const relative = normalizeFacing(side - station.placement.facing);
-      if (other.def.sides && !other.def.sides.includes(relative)) continue;
       for (const capability of other.def.grants) {
         grants.push({ capability, source: "attachment", fromItemId: other.placement.itemId, distance });
       }
@@ -253,7 +269,7 @@ export interface StationEfficiency {
 }
 
 export interface LayoutLink {
-  kind: "synergy" | "hazard" | "distance";
+  kind: "synergy" | "hazard" | "distance" | "attachment";
   ruleId: string;
   fromItemId: string;
   toItemId: string;
@@ -284,8 +300,12 @@ function rangeFactor(rule: { mode: string; range: number; falloff: number }, dis
   return 0;
 }
 
-/** Tiles reachable on foot from the door through free, non-water tiles (door tile included). */
+/**
+ * Tiles reachable on foot from the door through free, non-water tiles (door tile included).
+ * With `walkwayRequiredIndoors`, an indoor tile is only walkable when designated a walkway.
+ */
 function reachableFromDoor(ctx: Context): Set<string> {
+  const needWalkway = ctx.config.designations.walkwayRequiredIndoors;
   const door = ctx.resolved.find((r) => r.def.kind === "door");
   const reached = new Set<string>();
   if (!door) return reached;
@@ -298,6 +318,7 @@ function reachableFromDoor(ctx: Context): Set<string> {
       const key = hexKey(n.q, n.r);
       const tile = ctx.tileByKey.get(key);
       if (!tile || tile.tileType === "water" || ctx.occupied.has(key) || reached.has(key)) continue;
+      if (needWalkway && tile.tileType === "indoor" && tile.designation !== "walkway") continue;
       reached.add(key);
       queue.push(n);
     }
@@ -432,8 +453,7 @@ export function evaluateLayout(config: BaseLayoutConfig, input: LayoutInput): La
         label: "Daylight",
       });
     }
-    const front = hexNeighbor(s.placement, s.placement.facing);
-    const reachable = reached.has(hexKey(front.q, front.r));
+    const reachable = hexNeighbors(s.placement).some((n) => reached.has(hexKey(n.q, n.r)));
     if (!reachable) {
       list.push({ source: "unreachable", value: -config.unreachablePenalty, label: "Can't reach this station" });
       if (hasDoor) {
@@ -449,12 +469,19 @@ export function evaluateLayout(config: BaseLayoutConfig, input: LayoutInput): La
 
   // Attachments that don't touch any station they could serve.
   for (const a of ctx.resolved.filter((r) => r.def.kind === "attachment")) {
-    const served = stations.some((s) => {
-      if (hexDistance(s.placement, a.placement) !== 1) return false;
-      const side = directionBetween(s.placement, a.placement);
-      return side !== null && (!a.def.sides || a.def.sides.includes(normalizeFacing(side - s.placement.facing)));
-    });
-    if (!served) {
+    const served = stations.filter((s) => hexDistance(s.placement, a.placement) === 1);
+    for (const s of served) {
+      links.push({
+        kind: "attachment",
+        ruleId: a.def.id,
+        fromItemId: a.placement.itemId,
+        toItemId: s.placement.itemId,
+        distance: 1,
+        value: 0,
+        label: a.def.name,
+      });
+    }
+    if (!served.length) {
       warnings.push({ code: "unattached", itemIds: [a.placement.itemId], message: `${a.def.name} isn't attached to a station` });
     }
   }
@@ -497,6 +524,18 @@ export function diffLayouts(before: LayoutPlacement[], after: LayoutPlacement[])
 export interface LayoutCost {
   hours: number;
   perItem: Record<string, number>;
+  /** Part of `hours` spent on tile designation changes (0 for item-only costs). */
+  designationHours?: number;
+}
+
+/** Tiles whose designation differs between two designation lists (set, changed or cleared). */
+export function changedDesignationTiles(before: TileDesignation[], after: TileDesignation[]): Axial[] {
+  const a = new Map(before.map((d) => [hexKey(d.q, d.r), d]));
+  const b = new Map(after.map((d) => [hexKey(d.q, d.r), d]));
+  const out: Axial[] = [];
+  for (const [key, d] of b) if (a.get(key)?.designation !== d.designation) out.push({ q: d.q, r: d.r });
+  for (const [key, d] of a) if (!b.has(key)) out.push({ q: d.q, r: d.r });
+  return out;
 }
 
 /**
@@ -530,21 +569,45 @@ export function layoutCostHours(
 // ---------------------------------------------------------------------------
 
 export type LayoutCommitPlan =
-  | { ok: true; diff: LayoutDiff; cost: LayoutCost; gameSeconds: number }
+  | { ok: true; diff: LayoutDiff; cost: LayoutCost; gameSeconds: number; changedTiles: Axial[] }
   | { ok: false; reason: "invalid"; errors: LayoutError[] }
   | { ok: false; reason: "no-changes" };
 
-/** Everything the server decides about a commit, as one pure function (validate, diff, price). */
+/**
+ * Everything the server decides about a commit, as one pure function (validate, diff, price).
+ * `tiles` are the committed tiles (with their current designations); `requestedDesignations`
+ * is the full target designation list, or omitted to leave designations unchanged.
+ */
 export function planLayoutCommit(
   config: BaseLayoutConfig,
-  args: { tiles: LayoutTile[]; items: Record<string, LayoutItemInstance>; current: LayoutPlacement[]; requested: LayoutPlacement[] },
+  args: {
+    tiles: LayoutTile[];
+    items: Record<string, LayoutItemInstance>;
+    current: LayoutPlacement[];
+    requested: LayoutPlacement[];
+    requestedDesignations?: TileDesignation[];
+  },
 ): LayoutCommitPlan {
-  const errors = validateLayout(config, { tiles: args.tiles, items: args.items, placements: args.requested });
+  const currentDesignations = designationsOf(args.tiles);
+  const targetDesignations = args.requestedDesignations ?? currentDesignations;
+  const targetTiles = applyDesignations(args.tiles, targetDesignations);
+  // A designation naming a tile that isn't on the board is dropped by applyDesignations; reject it.
+  const known = new Set(args.tiles.map((t) => hexKey(t.q, t.r)));
+  const errors = validateLayout(config, { tiles: targetTiles, items: args.items, placements: args.requested });
+  for (const d of targetDesignations) {
+    if (!known.has(hexKey(d.q, d.r))) {
+      errors.push({ code: "bad-designation", message: `Designation is off the board (${hexKey(d.q, d.r)})` });
+    }
+  }
   if (errors.length) return { ok: false, reason: "invalid", errors };
+
   const diff = diffLayouts(args.current, args.requested);
-  if (!diff.added.length && !diff.removed.length && !diff.moved.length && !diff.rotated.length) {
+  const changedTiles = changedDesignationTiles(currentDesignations, targetDesignations);
+  if (!diff.added.length && !diff.removed.length && !diff.moved.length && !diff.rotated.length && !changedTiles.length) {
     return { ok: false, reason: "no-changes" };
   }
-  const cost = layoutCostHours(config, diff, args.items);
-  return { ok: true, diff, cost, gameSeconds: Math.round(cost.hours * 3600) };
+  const itemCost = layoutCostHours(config, diff, args.items);
+  const designationHours = changedTiles.length * config.designations.setHours;
+  const cost: LayoutCost = { ...itemCost, hours: itemCost.hours + designationHours, designationHours };
+  return { ok: true, diff, cost, gameSeconds: Math.round(cost.hours * 3600), changedTiles };
 }

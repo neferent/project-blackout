@@ -48,6 +48,7 @@ baseRoute.post("/layout/commit", requireAnonKey, async (c) => {
     items: base.items,
     current: base.placements,
     requested: body.placements,
+    requestedDesignations: body.designations,
   });
   if (!plan.ok) {
     return plan.reason === "invalid"
@@ -62,6 +63,7 @@ baseRoute.post("/layout/commit", requireAnonKey, async (c) => {
     baseId: base.baseId,
     baseVersion: base.layoutVersion,
     placements: body.placements,
+    designations: body.designations,
     hours: plan.cost.hours,
     gameSeconds: plan.gameSeconds,
   };

@@ -4,6 +4,24 @@ export const TILE_TYPES = ["indoor", "yard", "garden", "paved", "water", "road"]
 export const tileTypeSchema = z.enum(TILE_TYPES);
 export type TileType = z.infer<typeof tileTypeSchema>;
 
+/**
+ * Player-set tile designations, stored per base tile. Both keep items off the tile;
+ * `walkway` additionally counts as floor you can walk across when indoor tiles require one.
+ */
+export const DESIGNATIONS = ["walkway", "clear"] as const;
+export const designationSchema = z.enum(DESIGNATIONS);
+export type Designation = z.infer<typeof designationSchema>;
+
+export const designationRulesSchema = z.object({
+  /** Tile types a designation may be set on (never water or road). */
+  allowedTiles: z.array(tileTypeSchema).default(["indoor", "paved", "yard", "garden"]),
+  /** Game hours per tile whose designation is set, changed or cleared in a commit. */
+  setHours: z.number().nonnegative().default(0.05),
+  /** When true, a non-walkway indoor tile can't be walked across (door tile excepted). */
+  walkwayRequiredIndoors: z.boolean().default(false),
+});
+export type DesignationRules = z.infer<typeof designationRulesSchema>;
+
 export const itemKindSchema = z.enum(["station", "attachment", "door"]);
 export type ItemKind = z.infer<typeof itemKindSchema>;
 
@@ -28,11 +46,6 @@ export const itemDefSchema = z.object({
   capabilities: z.array(z.string()).default([]),
   /** Attachments: capabilities granted to an adjacent station. */
   grants: z.array(z.string()).default([]),
-  /**
-   * Attachments: station-relative sides (0..5, relative to the station's facing) the
-   * attachment must sit on to grant. Omitted = any side.
-   */
-  sides: z.array(facing).optional(),
   /** Bonus when placed on an indoor tile that borders a non-indoor tile or the board edge. */
   daylightBonus: z.number().nonnegative().optional(),
 });
@@ -84,6 +97,7 @@ export const baseLayoutConfigSchema = z.object({
   rotateHours: z.number().nonnegative().default(0.1),
   /** Move cost = moveBaseHours + weight * size * hexDistance * moveHoursPerUnit. */
   moveHoursPerUnit: z.number().nonnegative().default(0.05),
+  designations: designationRulesSchema.default({}),
   items: z.array(itemDefSchema).min(1),
   synergies: z.array(synergyRuleSchema).default([]),
   hazards: z.array(hazardRuleSchema).default([]),

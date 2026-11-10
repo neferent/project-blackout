@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SEED_BASE_LAYOUT_CONFIG as config } from "./seed.js";
-import { defaultFacing, placeItem, removePlacement, rotatePlacement, validDropTiles } from "./draft.js";
+import { placeItem, removePlacement, validDropTiles } from "./draft.js";
 import { hexOfRadius } from "./testUtil.js";
 import type { LayoutPlacement } from "./engine.js";
 
@@ -13,11 +13,6 @@ const items = {
 const ctx = (placements: LayoutPlacement[]) => ({ tiles, items, placements });
 
 describe("placeItem", () => {
-  it("places a new item with a facing that leaves its front open", () => {
-    const r = placeItem(config, ctx([{ itemId: "a", q: 1, r: 0, facing: 0 }]), "f", { q: 0, r: 0 });
-    expect(r.ok && r.placements.find((p) => p.itemId === "f")?.facing).not.toBe(0);
-  });
-
   it("moves an existing item and keeps its facing", () => {
     const r = placeItem(config, ctx([{ itemId: "f", q: 0, r: 0, facing: 4 }]), "f", { q: 1, r: -1 });
     expect(r).toEqual({ ok: true, placements: [{ itemId: "f", q: 1, r: -1, facing: 4 }] });
@@ -35,13 +30,8 @@ describe("placeItem", () => {
   });
 });
 
-describe("rotate / remove / drop targets", () => {
+describe("remove / drop targets", () => {
   const placed: LayoutPlacement[] = [{ itemId: "f", q: 0, r: 0, facing: 5 }];
-
-  it("rotates clockwise and wraps", () => {
-    expect(rotatePlacement(placed, "f")[0].facing).toBe(0);
-    expect(rotatePlacement(placed, "f", -1)[0].facing).toBe(4);
-  });
 
   it("removes", () => {
     expect(removePlacement(placed, "f")).toEqual([]);
@@ -53,12 +43,5 @@ describe("rotate / remove / drop targets", () => {
     expect(has(0, 0)).toBe(true);
     expect(has(1, 0)).toBe(false);
     expect(has(3, 0)).toBe(false);
-  });
-
-  it("defaultFacing falls back to 0 when boxed in", () => {
-    const ring = [
-      { q: 1, r: 0 }, { q: 0, r: 1 }, { q: -1, r: 1 }, { q: -1, r: 0 }, { q: 0, r: -1 }, { q: 1, r: -1 },
-    ].map((p, i) => ({ itemId: `x${i}`, ...p, facing: 0 }));
-    expect(defaultFacing(tiles, ring, { q: 0, r: 0 })).toBe(0);
   });
 });

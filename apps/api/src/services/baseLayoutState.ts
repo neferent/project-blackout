@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import {
+  designationSchema,
   evaluateLayout,
   tileTypeSchema,
   type BaseLayoutState,
@@ -40,6 +41,7 @@ export async function loadBaseLayoutState(anonKey: string): Promise<BaseLayoutSt
     r: t.r,
     tileType: tileTypeSchema.parse(t.tileType) as TileType,
     convertedFrom: t.convertedFrom ? (tileTypeSchema.parse(t.convertedFrom) as TileType) : null,
+    designation: t.designation ? designationSchema.parse(t.designation) : null,
   }));
   const itemMap = Object.fromEntries(
     itemRows.map((i) => [i.id, { definitionId: i.definitionId, quality: Number(i.quality) }]),
@@ -70,6 +72,7 @@ export async function loadBaseLayoutState(anonKey: string): Promise<BaseLayoutSt
           endsAt: active.endsAt.toISOString(),
           hours: active.data.hours,
           placements: active.data.placements,
+          designations: active.data.designations,
         }
       : null,
   };

@@ -1,4 +1,4 @@
-import type { TileType } from "@blackout/shared";
+import type { Designation, TileType } from "@blackout/shared";
 
 export const TILE_COLORS: Record<TileType, string> = {
   indoor: "#6a655c",
@@ -26,6 +26,11 @@ export const TILE_DETAILS: Record<TileType, string> = {
   paved: "convertible",
   water: "impassable",
   road: "convertible",
+};
+
+export const DESIGNATION_NAMES: Record<Designation, string> = {
+  walkway: "walkway",
+  clear: "kept clear",
 };
 
 export const tileLabel = (type: TileType): string => `${TILE_NAMES[type]} · ${TILE_DETAILS[type]}`;

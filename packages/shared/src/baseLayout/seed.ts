@@ -5,6 +5,7 @@ const seed: BaseLayoutConfigInput = {
   version: 1,
   bonusCap: 0.25,
   maxPenalty: 0.5,
+  designations: { setHours: 0.05, walkwayRequiredIndoors: true },
   items: [
     // --- Stations ---
     {
@@ -51,7 +52,7 @@ const seed: BaseLayoutConfigInput = {
     {
       id: "bellows", name: "Bellows", kind: "attachment", slots: ["indoor", "paved", "yard"],
       tags: ["tool"], weight: 2, size: 1, placeHours: 0.3, moveBaseHours: 0.1,
-      grants: ["forced_air"], sides: [3],
+      grants: ["forced_air"],
     },
     {
       id: "quench_barrel", name: "Quench barrel", kind: "attachment", slots: ["indoor", "paved", "yard"],

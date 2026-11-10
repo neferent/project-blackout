@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { LayoutEvaluation, LayoutItemInstance, LayoutPlacement, LayoutTile } from "./engine.js";
-import type { TileType } from "./config.js";
+import { designationSchema, type TileType } from "./config.js";
 
 export const layoutPlacementSchema = z.object({
   itemId: z.string().uuid(),
@@ -14,9 +14,17 @@ export const layoutPlacementSchema = z.object({
  * version it planned against; the server derives the diff itself and never trusts a
  * client-supplied cost or duration.
  */
+export const tileDesignationSchema = z.object({
+  q: z.number().int(),
+  r: z.number().int(),
+  designation: designationSchema,
+});
+
 export const commitLayoutRequestSchema = z.object({
   baseVersion: z.number().int().nonnegative(),
   placements: z.array(layoutPlacementSchema).max(500),
+  /** Full target set of designated tiles. Omitted = leave designations as they are. */
+  designations: z.array(tileDesignationSchema).max(500).optional(),
 });
 export type CommitLayoutRequest = z.infer<typeof commitLayoutRequestSchema>;
 
@@ -27,6 +35,8 @@ export const layoutActionDataSchema = z.object({
   baseVersion: z.number().int().nonnegative(),
   /** The full layout that becomes committed when the action ends. */
   placements: z.array(layoutPlacementSchema),
+  /** Target designated tiles; absent (older actions) = designations unchanged. */
+  designations: z.array(tileDesignationSchema).optional(),
   hours: z.number().nonnegative(),
   gameSeconds: z.number().nonnegative(),
 });
@@ -39,6 +49,7 @@ export interface ActiveLayoutAction {
   hours: number;
   /** The layout that will apply when it finishes. */
   placements: LayoutPlacement[];
+  designations?: z.infer<typeof tileDesignationSchema>[];
 }
 
 /** Response of GET /base: everything the client needs to render and plan a layout. */

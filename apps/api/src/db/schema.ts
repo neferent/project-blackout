@@ -87,6 +87,8 @@ export const baseTiles = pgTable(
     r: integer("r").notNull(),
     tileType: text("tile_type").notNull(),
     convertedFrom: text("converted_from"),
+    /** Player-set designation ("walkway" | "clear"); null = plain tile. Rules: baseLayout config. */
+    designation: text("designation"),
   },
   (table) => ({
     pk: primaryKey({ columns: [table.baseId, table.q, table.r] }),

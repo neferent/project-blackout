@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { getItemDef, interactionCellForPosition, realSecondsFromGameSeconds, SEED_BASE_LAYOUT_CONFIG } from "@blackout/shared";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  getItemDef,
+  interactionCellForPosition,
+  realSecondsFromGameSeconds,
+  SEED_BASE_LAYOUT_CONFIG,
+  type Designation,
+} from "@blackout/shared";
 import { usePlayerStore } from "../../stores/playerStore.js";
 import BaseGrid, { type StationLabel } from "./BaseGrid.vue";
+import { useBoardCamera } from "./boardCamera.js";
 import ItemPalette from "./ItemPalette.vue";
 import { useBaseStore } from "./baseStore.js";
 import { useLayoutDraftStore } from "./layoutDraftStore.js";
-import { TILE_COLORS, TILE_NAMES, TILE_TYPE_ORDER, tileLabel } from "./tileStyle.js";
+import { DESIGNATION_NAMES, TILE_COLORS, TILE_NAMES, TILE_TYPE_ORDER, tileLabel } from "./tileStyle.js";
 
 defineEmits<{ (e: "close"): void }>();
 
@@ -32,6 +39,8 @@ watch(
 /** While a layout action runs the base is locked: show the committed layout, read-only. */
 const locked = computed(() => Boolean(baseStore.state?.activeLayoutAction));
 const shownPlacements = computed(() => (locked.value ? draft.committed : draft.placements));
+/** Draft tiles carry the painted designations; while locked show what's committed. */
+const shownTiles = computed(() => (locked.value ? (baseStore.state?.tiles ?? []) : draft.tiles));
 
 const defOf = (itemId: string) => {
   const instance = draft.items[itemId];
@@ -104,19 +113,94 @@ function onUp(e: PointerEvent) {
     paletteSelectedId.value = paletteSelectedId.value === d.itemId ? null : d.itemId;
     selectedItemId.value = null;
   } else {
-    draft.rotate(d.itemId);
     selectedItemId.value = d.itemId;
   }
 }
+
+function onKey(e: KeyboardEvent) {
+  const el = e.target as HTMLElement | null;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+  if (!selectedItemId.value || locked.value || e.ctrlKey || e.metaKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === "delete" || k === "backspace") removeSelected();
+}
+onMounted(() => window.addEventListener("keydown", onKey));
+
+/** Snap preview while an item is dragged across the board. */
+const preview = computed(() => {
+  const d = drag.value;
+  if (!d?.moved) return null;
+  const tile = grid.value?.tileAt(d.x, d.y);
+  if (!tile) return null;
+  const here = draft.placements.find((p) => p.itemId === d.itemId);
+  const valid = (here?.q === tile.q && here?.r === tile.r) || dropTargets.value.some((t) => t.q === tile.q && t.r === tile.r);
+  return { itemId: d.itemId, tile, valid };
+});
 
 function overPalette(x: number, y: number): boolean {
   const r = paletteEl.value?.getBoundingClientRect();
   return Boolean(r && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom);
 }
 
+// --- Tile designation painting ---------------------------------------------------------
+
+type Tool = "items" | Designation | "erase";
+const tool = ref<Tool>("items");
+const TOOLS: { id: Tool; label: string; hint: string }[] = [
+  { id: "items", label: "Items", hint: "Place and move items." },
+  { id: "walkway", label: "Walkway", hint: "Paint floor to walk across. Indoor stations need a walkway to be reached from the door." },
+  { id: "clear", label: "Keep clear", hint: "Paint tiles to keep empty. Nothing can be placed there." },
+  { id: "erase", label: "Erase", hint: "Remove a walkway or keep-clear mark." },
+];
+const toolHint = computed(() => TOOLS.find((t) => t.id === tool.value)?.hint ?? "");
+const painting = ref(false);
+let lastPainted: string | null = null;
+
+function paintTile(tile: { q: number; r: number }) {
+  const key = `${tile.q},${tile.r}`;
+  if (key === lastPainted) return;
+  lastPainted = key;
+  draft.paint(tile, tool.value === "erase" ? null : (tool.value as Designation));
+}
+
+function onPaintMove(e: PointerEvent) {
+  const tile = grid.value?.tileAt(e.clientX, e.clientY);
+  if (tile) paintTile(tile);
+}
+
+function endPaint() {
+  painting.value = false;
+  lastPainted = null;
+  window.removeEventListener("pointermove", onPaintMove);
+  window.removeEventListener("pointerup", endPaint);
+  window.removeEventListener("pointercancel", endPaint);
+}
+
+function startPaint(tile: { q: number; r: number }) {
+  selectedItemId.value = null;
+  paletteSelectedId.value = null;
+  painting.value = true;
+  paintTile(tile);
+  window.addEventListener("pointermove", onPaintMove);
+  window.addEventListener("pointerup", endPaint);
+  window.addEventListener("pointercancel", endPaint);
+}
+
+function setTool(next: Tool) {
+  tool.value = next;
+  if (next !== "items") {
+    selectedItemId.value = null;
+    paletteSelectedId.value = null;
+  }
+}
+
 function onBoardDown(e: { tile: { q: number; r: number }; clientX: number; clientY: number }) {
   selectedTile.value = e.tile;
   if (locked.value) return;
+  if (tool.value !== "items") {
+    startPaint(e.tile);
+    return;
+  }
   const placement = draft.placements.find((p) => p.q === e.tile.q && p.r === e.tile.r);
   if (placement) {
     startDrag(placement.itemId, "board", e.clientX, e.clientY);
@@ -135,7 +219,11 @@ function onPaletteDown(e: { itemId: string; clientX: number; clientY: number }) 
   startDrag(e.itemId, "palette", e.clientX, e.clientY);
 }
 
-onBeforeUnmount(stopListening);
+onBeforeUnmount(() => {
+  stopListening();
+  endPaint();
+  window.removeEventListener("keydown", onKey);
+});
 
 function removeSelected() {
   if (!selectedItemId.value) return;
@@ -186,13 +274,13 @@ const selectedInfo = computed(() => {
   const state = baseStore.state;
   const sel = selectedTile.value;
   if (!state || !sel) return null;
-  const tile = state.tiles.find((t) => t.q === sel.q && t.r === sel.r);
+  const tile = shownTiles.value.find((t) => t.q === sel.q && t.r === sel.r);
   if (!tile) return null;
   const placement = shownPlacements.value.find((p) => p.q === sel.q && p.r === sel.r);
   const instance = placement && draft.items[placement.itemId];
   const def = placement && defOf(placement.itemId);
   return {
-    label: tileLabel(tile.tileType),
+    label: tileLabel(tile.tileType) + (tile.designation ? ` · ${DESIGNATION_NAMES[tile.designation]}` : ""),
     item: def && instance ? `${def.name} (quality ${instance.quality.toFixed(1)})` : null,
   };
 });
@@ -267,8 +355,16 @@ const progress = computed(() => {
   };
 });
 
-// Fit the board to narrow phone screens.
-const gridWidth = computed(() => Math.min(440, Math.max(260, (typeof window === "undefined" ? 440 : window.innerWidth) - 56)));
+const viewport = ref<HTMLElement | null>(null);
+const edgeScroll = ref(true);
+const camera = useBoardCamera(
+  viewport,
+  (x, y) => Boolean(grid.value?.tileAt(x, y)),
+  () => edgeScroll.value && !locked.value,
+);
+const { cam, zoom, panning } = camera;
+// The viewport is v-if'd on the loaded base state; fit the board when it first appears.
+watch(viewport, (el) => el && nextTick(() => camera.recenter()));
 </script>
 
 <template>
@@ -288,28 +384,60 @@ const gridWidth = computed(() => Math.min(440, Math.max(260, (typeof window === 
       </div>
 
       <template v-if="baseStore.state">
-        <BaseGrid
-          ref="grid"
-          :tiles="baseStore.state.tiles"
-          :placements="shownPlacements"
-          :items="baseStore.state.items"
-          :selected="selectedTile"
-          :focus-item-id="selectedItemId"
-          :links="evaluation.links"
-          :labels="stationLabels"
-          :bad-item-ids="badItemIds"
-          :drop-targets="dropTargets"
-          :width="gridWidth"
-          :dimmed="locked"
-          @down="onBoardDown"
-        />
+        <div class="zoom-bar">
+          <span class="hint keys">Wheel zoom · WASD/arrows or screen edge to move · drag to look around · Space to recenter</span>
+          <label class="edge-toggle"><input v-model="edgeScroll" type="checkbox" /> Edge scroll</label>
+          <button aria-label="Zoom out" @click="camera.zoomTo(zoom / 1.25)">−</button>
+          <button class="zoom-readout" aria-label="Recenter" @click="camera.recenter()">Fit</button>
+          <button aria-label="Zoom in" @click="camera.zoomTo(zoom * 1.25)">+</button>
+        </div>
+        <div v-if="!locked" class="tool-bar" role="toolbar" aria-label="Board tool">
+          <button
+            v-for="t in TOOLS"
+            :key="t.id"
+            :class="{ active: tool === t.id }"
+            :title="t.hint"
+            @click="setTool(t.id)"
+          >{{ t.label }}</button>
+          <span v-if="tool !== 'items'" class="hint">{{ toolHint }} Drag to paint several tiles.</span>
+        </div>
+        <div
+          ref="viewport"
+          class="grid-viewport"
+          :class="{ panning }"
+          @wheel="camera.handlers.onWheel"
+          @pointerdown="camera.handlers.onPointerDown"
+          @pointermove="camera.handlers.onPointerMove"
+          @pointerup="camera.handlers.onPointerUp"
+          @pointercancel="camera.handlers.onPointerUp"
+          @pointerleave="camera.handlers.onPointerLeave"
+          @contextmenu.prevent
+        >
+          <BaseGrid
+            ref="grid"
+            :tiles="shownTiles"
+            :placements="shownPlacements"
+            :items="baseStore.state.items"
+            :selected="selectedTile"
+            :focus-item-id="selectedItemId"
+            :links="evaluation.links"
+            :labels="stationLabels"
+            :bad-item-ids="badItemIds"
+            :drop-targets="dropTargets"
+            :cam="cam"
+            :zoom="zoom"
+            :dimmed="locked"
+            :preview="preview"
+            @down="onBoardDown"
+          />
+        </div>
 
         <div class="tile-info">
           <template v-if="selectedInfo">
             <strong>{{ selectedInfo.label }}</strong>
             <span v-if="selectedInfo.item"> — {{ selectedInfo.item }}</span>
           </template>
-          <span v-else class="hint">Drag items onto the board. Tap a placed item to rotate it.</span>
+          <span v-else class="hint">Drag items onto the board. Place an attachment next to a station to link them.</span>
         </div>
         <p v-if="draft.message" class="note error">{{ draft.message }}</p>
 
@@ -326,7 +454,6 @@ const gridWidth = computed(() => Math.min(440, Math.max(260, (typeof window === 
         <p v-if="blockReason" class="hint">{{ blockReason }}</p>
 
         <div v-if="selectedItemId && !locked" class="item-actions">
-          <button @click="draft.rotate(selectedItemId)">Rotate</button>
           <button class="danger" @click="removeSelected">Remove</button>
         </div>
 
@@ -366,6 +493,8 @@ const gridWidth = computed(() => Math.min(440, Math.max(260, (typeof window === 
           <li v-for="type in TILE_TYPE_ORDER" :key="type">
             <span class="swatch" :style="{ background: TILE_COLORS[type] }"></span>{{ TILE_NAMES[type] }}
           </li>
+          <li><span class="swatch walkway"></span>Walkway</li>
+          <li><span class="swatch clear"></span>Keep clear</li>
         </ul>
       </template>
     </div>
@@ -439,6 +568,54 @@ h3 {
 .note.error,
 .error {
   color: #e0705f;
+}
+.zoom-bar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.zoom-bar button {
+  min-width: 32px;
+  height: 28px;
+  background: #23221e;
+  border: 1px solid #34332c;
+  border-radius: 4px;
+  color: #d8d4c8;
+  cursor: pointer;
+}
+.zoom-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.zoom-readout {
+  min-width: 52px !important;
+  font-size: 12px;
+}
+.grid-viewport {
+  height: min(60vh, 520px);
+  min-height: 260px;
+  overflow: hidden;
+  border: 1px solid #34332c;
+  border-radius: 4px;
+  background: #0d0d0c;
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+.grid-viewport.panning,
+.grid-viewport.panning :deep(canvas) {
+  cursor: grabbing;
+}
+.keys {
+  margin-right: auto;
+  align-self: center;
+}
+.edge-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #8a8578;
 }
 .tile-info {
   min-height: 24px;
@@ -578,6 +755,34 @@ h3 {
   border: 1px solid #55534a;
   margin-right: 5px;
   vertical-align: -1px;
+}
+.swatch.walkway {
+  background: rgba(226, 208, 150, 0.45);
+  border: 1px dotted #f2e2aa;
+}
+.swatch.clear {
+  background: transparent;
+  border: 1px dashed #96bedc;
+}
+.tool-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.tool-bar button {
+  height: 28px;
+  padding: 0 10px;
+  background: #23221e;
+  border: 1px solid #34332c;
+  border-radius: 4px;
+  color: #d8d4c8;
+  cursor: pointer;
+}
+.tool-bar button.active {
+  border-color: #f2d27a;
+  color: #f2d27a;
 }
 .ghost {
   position: fixed;

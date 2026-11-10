@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { hexOfRadius } from "./testUtil.js";
 import { SEED_BASE_LAYOUT_CONFIG as config } from "./seed.js";
 import {
+  applyDesignations,
+  changedDesignationTiles,
   diffLayouts,
   evaluateLayout,
   layoutCostHours,
@@ -30,6 +32,13 @@ function layout(
 
 // Door at (0,6)-ish edge with an open corridor, stations facing a free tile.
 const door = { id: "d", def: "door", q: -3, r: 0, facing: 0 };
+
+const withWalkways = (base: typeof tiles, at: { q: number; r: number }[]) =>
+  applyDesignations(base, at.map((p) => ({ ...p, designation: "walkway" as const })));
+/** From the door at (-3,0), around a forge at (0,0), to its front tile (1,0). */
+const WALK_TO_FRONT = [
+  { q: -2, r: 0 }, { q: -1, r: 0 }, { q: 0, r: -1 }, { q: 1, r: -1 }, { q: 1, r: 0 },
+];
 
 describe("hex helpers", () => {
   it("measures distance and direction", () => {
@@ -68,15 +77,6 @@ describe("validateLayout", () => {
     const codes = validateLayout(config, l).map((e) => e.code);
     expect(codes).toContain("slot-mismatch");
     expect(codes.filter((c) => c === "slot-mismatch")).toHaveLength(2);
-  });
-
-  it("requires an open front tile", () => {
-    const l = layout([
-      { id: "f", def: "forge", q: 0, r: 0, facing: 0 },
-      { id: "a", def: "anvil", q: 1, r: 0, facing: 3 },
-    ]);
-    const errs = validateLayout(config, l);
-    expect(errs.filter((e) => e.code === "front-blocked").map((e) => e.itemId).sort()).toEqual(["a", "f"]);
   });
 
   it("rejects duplicates, off-board, two doors, bad facing", () => {
@@ -168,15 +168,16 @@ describe("evaluateLayout", () => {
 
   it("penalizes unreachable stations and everything when there is no door", () => {
     const walled = layout([door, { id: "f", def: "forge", q: 0, r: 0, facing: 0 }]);
-    // Door isolated by a ring of items around the forge's front tile (1,0).
+    // Door at (-3,0) walled in by items on all six neighbors.
     const ring = [
-      { q: 2, r: -1 }, { q: 2, r: 0 }, { q: 1, r: 1 }, { q: 0, r: 1 }, { q: 1, r: -1 },
+      { q: -2, r: 0 }, { q: -4, r: 0 }, { q: -3, r: 1 }, { q: -3, r: -1 }, { q: -2, r: -1 }, { q: -4, r: 1 },
     ].map((p, i) => ({ id: `l${i}`, def: "lamp", ...p }));
     const blocked = evaluateLayout(config, layout([door, { id: "f", def: "forge", q: 0, r: 0, facing: 0 }, ...ring]));
     expect(blocked.stations.f.reachable).toBe(false);
     expect(blocked.stations.f.breakdown.some((b) => b.source === "unreachable")).toBe(true);
 
-    const open = evaluateLayout(config, walled);
+    // Indoors needs a walkway: painted from the door to a tile next to the forge.
+    const open = evaluateLayout(config, { ...walled, tiles: withWalkways(tiles, WALK_TO_FRONT) });
     expect(open.stations.f.reachable).toBe(true);
 
     const noDoor = evaluateLayout(config, layout([{ id: "f", def: "forge", q: 0, r: 0, facing: 0 }]));
@@ -186,8 +187,7 @@ describe("evaluateLayout", () => {
 });
 
 describe("resolveCapabilities", () => {
-  it("resolves own, side-restricted attachment, and nearby station capabilities", () => {
-    // Forge facing 1; bellows needs station-relative side 3. Direction 4 (0,-1) -> relative (4-1)=3.
+  it("resolves own, adjacent attachment (any side), and nearby station capabilities", () => {
     const good = layout([
       { id: "f", def: "forge", q: 0, r: 0, facing: 1 },
       { id: "b", def: "bellows", q: 0, r: -1 },
@@ -200,11 +200,21 @@ describe("resolveCapabilities", () => {
     expect(requirementMet(grants, { capability: "hammering", range: 2 })).toBe(false);
     expect(requirementMet(grants, { capability: "hammering", range: 3 })).toBe(true);
 
-    const wrongSide = layout([
-      { id: "f", def: "forge", q: 0, r: 0, facing: 1 },
+    const otherSide = layout([
+      { id: "f", def: "forge", q: 0, r: 0 },
       { id: "b", def: "bellows", q: 1, r: 0 },
     ]);
-    expect(requirementMet(resolveCapabilities(config, wrongSide, "f"), { capability: "forced_air" })).toBe(false);
+    expect(requirementMet(resolveCapabilities(config, otherSide, "f"), { capability: "forced_air" })).toBe(true);
+  });
+
+  it("links an attachment to every adjacent station", () => {
+    const l = layout([
+      { id: "w1", def: "workbench", q: -1, r: 0 },
+      { id: "w2", def: "workbench", q: 1, r: 0 },
+      { id: "v", def: "vice", q: 0, r: 0 },
+    ]);
+    const links = evaluateLayout(config, l).links.filter((k) => k.kind === "attachment");
+    expect(links.map((k) => k.toItemId).sort()).toEqual(["w1", "w2"]);
   });
 
   it("lets one attachment serve two stations", () => {
@@ -287,5 +297,55 @@ describe("planLayoutCommit", () => {
   it("rejects items the player doesn't own", () => {
     const bad = planLayoutCommit(config, args([...current, { itemId: "stolen", q: 0, r: 0, facing: 1 }]));
     expect(bad).toMatchObject({ ok: false, reason: "invalid" });
+  });
+});
+
+describe("tile designations", () => {
+  const forgeAtOrigin = layout([door, { id: "f", def: "forge", q: 0, r: 0, facing: 0 }]);
+
+  it("needs a walkway across indoor tiles, but not when the rule is off", () => {
+    expect(evaluateLayout(config, forgeAtOrigin).stations.f.reachable).toBe(false);
+    const relaxed = baseLayoutConfigSchema.parse({ ...config, designations: { walkwayRequiredIndoors: false } });
+    expect(evaluateLayout(relaxed, forgeAtOrigin).stations.f.reachable).toBe(true);
+  });
+
+  it("a broken walkway leaves the station unreachable", () => {
+    const gap = WALK_TO_FRONT.filter((p) => !(p.q === -1 && p.r === 0));
+    const result = evaluateLayout(config, { ...forgeAtOrigin, tiles: withWalkways(tiles, gap) });
+    expect(result.stations.f.reachable).toBe(false);
+  });
+
+  it("walkways outdoors are never required", () => {
+    const yard = hexOfRadius(6, "yard");
+    expect(evaluateLayout(config, { ...forgeAtOrigin, tiles: yard }).stations.f.reachable).toBe(true);
+  });
+
+  it("keeps items off designated tiles and off water/road", () => {
+    const onWalkway = { ...forgeAtOrigin, tiles: withWalkways(tiles, [{ q: 0, r: 0 }]) };
+    expect(validateLayout(config, onWalkway).some((e) => e.code === "designated-tile")).toBe(true);
+
+    const water = applyDesignations(hexOfRadius(6, "water"), [{ q: 2, r: 2, designation: "clear" }]);
+    expect(validateLayout(config, { tiles: water, placements: [], items: {} }).some((e) => e.code === "bad-designation")).toBe(true);
+  });
+
+  it("prices designation changes per tile and counts them as a change", () => {
+    const base = { tiles, items: forgeAtOrigin.items, current: forgeAtOrigin.placements, requested: forgeAtOrigin.placements };
+    expect(planLayoutCommit(config, base)).toEqual({ ok: false, reason: "no-changes" });
+
+    const plan = planLayoutCommit(config, { ...base, requestedDesignations: WALK_TO_FRONT.map((p) => ({ ...p, designation: "walkway" as const })) });
+    expect(plan.ok).toBe(true);
+    if (plan.ok) {
+      expect(plan.cost.hours).toBeCloseTo(5 * config.designations.setHours, 6);
+      expect(plan.changedTiles).toHaveLength(5);
+    }
+
+    const offBoard = planLayoutCommit(config, { ...base, requestedDesignations: [{ q: 99, r: 99, designation: "clear" }] });
+    expect(offBoard.ok).toBe(false);
+  });
+
+  it("diffs designations: changed kind and cleared tiles both count once", () => {
+    const before = [{ q: 0, r: 0, designation: "walkway" as const }, { q: 1, r: 0, designation: "clear" as const }];
+    const after = [{ q: 0, r: 0, designation: "clear" as const }];
+    expect(changedDesignationTiles(before, after)).toHaveLength(2);
   });
 });
