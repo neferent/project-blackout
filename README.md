@@ -1,8 +1,56 @@
-# Project Blackout — POC
+# Project Blackout
 
-A shared-world, location-based scavenging/crafting/trading game on the real map of Earth.
-This is a proof of concept: map loading, start placement, and travel along real streets
-with a server-authoritative game clock. See `ARCHITECTURE.md` for how it's built to extend.
+A shared-world, location-based survival game played on the real map of Earth. The
+power grid has failed and the world is dark. Pick a spot anywhere on the planet, settle
+in, and start rebuilding: scavenge, craft, trade, and fortify a base, all on top of real
+streets, buildings and infrastructure from OpenStreetMap.
+
+The game is a proof of concept. The core loop of placing yourself in the world, moving
+through it, and building a base is playable. Scavenging, trading and crafting are designed
+but not built yet.
+
+## Ideas behind it
+
+- **The real world is the level.** Maps, buildings and roads come from OpenStreetMap, so
+  your neighborhood is the game board. Walking routes are computed on real pedestrian
+  paths.
+- **Game time runs faster than real time.** One real minute is one game hour, and
+  everyone walks at 5 km/h in game time. Crossing a city takes a few real minutes.
+- **The server owns the clock.** Every action (traveling, building) has a start and end
+  time stored on the server. Position, progress and each player's personal clock are
+  computed when read, not advanced by client ticks. Nothing the client says about time is
+  trusted.
+- **The dark grid is dangerous.** The power grid is still intact but unsafe to connect to.
+  Real transmission lines, towers, substations and plants are imported from OSM and drive
+  a danger value that routing takes into account.
+- **Bases are hex boards.** Each player gets a fixed 127-tile hex board stretched over the
+  real H3 cell they chose, with the surrounding buildings, water, roads and landcover
+  mapped onto it. Players place stations and items on it, and adjacent items boost each
+  other (an anvil next to a forge makes crafting faster, for example).
+
+## What works today
+
+- Interactive map with a stylized flat 2D look (MapLibre GL JS over OpenFreeMap tiles)
+- Building and place identification on click (Overpass point-in-polygon, Nominatim fallback)
+- Choosing a starting location and creating an anonymous player
+- Pedestrian routing and travel along real streets (self-hosted Valhalla), with smooth
+  client animation that matches the server's authoritative position
+- A power-grid danger layer backed by imported OSM data, with a disconnect action
+- Base hex board: layout planning with live preview, synergy and hazard rules, tile
+  designations (walkway/clear), and committing a layout as a timed action priced by the
+  server
+
+## Not built yet
+
+Scavenging, real inventory and acquisition, trading, crafting, encounters, NPCs,
+multiplayer interaction, user accounts (identity is anonymous for now), and deployment.
+
+## Documentation
+
+- [`ARCHITECTURE.md`](ARCHITECTURE.md): the action system, personal clock, position
+  resolution, and the extension points for new features
+- [`docs/base-layout.md`](docs/base-layout.md): format of the base-layout rule config
+- [`CLAUDE.md`](CLAUDE.md): project rules and conventions
 
 ## Stack
 
